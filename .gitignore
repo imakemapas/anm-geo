@@ -1,0 +1,13 @@
+data/
+*.csv
+*.shp
+*.shx
+*.dbf
+*.prj
+*.zip
+*.rds
+*.xlsx
+.Rproj.user/
+__pycache__/
+*.pyc
+.env
