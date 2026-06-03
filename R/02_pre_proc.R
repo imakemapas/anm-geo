@@ -17,10 +17,6 @@ suppressPackageStartupMessages({
 })
 
 # Paths and parameters
-# ROOT         <- "C:/GP/R"
-# RAW_DIR      <- file.path(ROOT, "data", "raw_data")
-# PRE_PROC_DIR <- file.path(ROOT, "data", "pre_proc_data")
-# TMP_DIR      <- file.path(ROOT, "data", "tmp")
 ROOT         <- here::here()
 RAW_DIR      <- here::here("data", "raw_data")
 PRE_PROC_DIR <- here::here("data", "pre_proc_data")
@@ -54,14 +50,6 @@ safe_step <- function(label, expr) {
   etl_log[[label]] <<- status
   return(status$success)
 }
-
-# safe_step <- function(label, expr) {
-#   message("\n--- ", label, " ---")
-#   tryCatch(
-#     { force(expr); TRUE },
-#     error = function(e) { warning(label, " failed: ", conditionMessage(e)); FALSE }
-#   )
-# }
 
 safe_unzip <- function(zip_path, exdir) {
   if (!file.exists(zip_path)) return(FALSE)
@@ -175,7 +163,6 @@ safe_step("ANM SCM consolidation", {
   cadastro_mineiro <- purrr::map_df(scm_files, \(f) {
     doc_type <- stringr::str_remove(basename(f), "\\.csv$")
     
-    # Robust encoding handling (ISO-8859-1 -> UTF-8)
     raw <- readr::read_file_raw(f)
     txt <- stringi::stri_encode(raw, from = "ISO-8859-1", to = "UTF-8")
     
@@ -186,7 +173,6 @@ safe_step("ANM SCM consolidation", {
       show_col_types = FALSE
     ) 
     
-    # Correção das Inconsistências Críticas da ANM antes de empilhar
     names(df) <- stringr::str_replace_all(names(df), "CPF CNPJ do titular", "CPF/CNPJ do titular")
     names(df) <- stringr::str_replace_all(names(df), "^Substancia$", "Substância(s)")
     
@@ -355,7 +341,6 @@ safe_step("INCRA Quilombolas", {
 
   shp_zip <- NA_character_
 
-  # tenta ZIP
   if (safe_unzip(zip_path, exdir)) {
     shp_zip <- first_match(exdir, "\\.shp$")
   }
@@ -373,7 +358,6 @@ safe_step("INCRA Quilombolas", {
     message("Quilombolas saved (from ZIP).")
   }
 
-  # fallback local
   incra_local_dir <- file.path(RAW_DIR, "geo_incra")
 
   shp_local <- list.files(
@@ -485,7 +469,7 @@ safe_step("ICMBio infractions (shp)", {
   shp_path <- first_match(exdir, "autos_infracao_icmbio\\.shp$")
   if (is.na(shp_path)) stop("No ICMBio infractions shapefile found after unzip.")
   
-  INFic <- terra::vect(shp_path)  # keep raw topology unless you need cleaning
+  INFic <- terra::vect(shp_path)
   INFic <- INFic[, c("tipo","valor_mult","embargo","apreensao","autuado","cpf_cnpj",
                      "desc_ai","desc_sanc","data","ano","tipo_infra","municipio","uf","processo")]
   

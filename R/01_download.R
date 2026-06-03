@@ -12,8 +12,6 @@ suppressPackageStartupMessages({
   library(here)
 })
 
-# ROOT    <- "C:/GP/R"
-# RAW_DIR <- file.path(ROOT, "data", "raw_data")
 ROOT    <- here::here()
 RAW_DIR <- here::here("data", "raw_data")
 TIMEOUT <- 300
@@ -128,6 +126,7 @@ config_anm <- list(
       "metadados-cfem.ods"
     )
   )
+  
   # ,
   # Tah = list(
   #   dest = "anm_Tah",
