@@ -338,3 +338,4 @@ DROP TABLE IF EXISTS micro_unidade_protocolizadora CASCADE;
 CREATE TABLE micro_unidade_protocolizadora (idunidadeprotocolizadora TEXT PRIMARY KEY, dsunidadeprotocolizadora TEXT);
 
 -- Fim do schema. Próximo: carga (Python), depois 02_constraints.sql.
+SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';

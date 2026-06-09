@@ -73,9 +73,9 @@ def carregar_csv(arquivo, tabela):
  
 # --- Execução ----------------------------------------------------------------
 if __name__ == "__main__":
-    #carregar_geojson("pma_amzl_ALLminerals_final.geojson", "processos")
-    #carregar_geojson("ti_amzl.geojson",  "terras_indigenas")
-    #carregar_geojson("uc_amzl.geojson",  "unidades_conservacao")
+    carregar_geojson("pma_amzl_ALLminerals_final.geojson", "processos")
+    carregar_geojson("ti_amzl.geojson",  "terras_indigenas")
+    carregar_geojson("uc_amzl.geojson",  "unidades_conservacao")
     carregar_geojson("qui_amzl.geojson", "quilombolas")
     carregar_csv("cfem_amzl_ALLminerals_GOLD_CASScorrected.csv", "cfem_eventos")
     carregar_csv("cfem_aut_all_min_amzl.csv", "cfem_autuacoes")
