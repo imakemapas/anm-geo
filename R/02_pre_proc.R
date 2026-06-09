@@ -16,6 +16,9 @@ suppressPackageStartupMessages({
   library(here)
 })
 
+Sys.unsetenv("PROJ_LIB")
+Sys.unsetenv("GDAL_DATA")
+
 # Paths and parameters
 ROOT         <- here::here()
 RAW_DIR      <- here::here("data", "raw_data")

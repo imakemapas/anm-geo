@@ -5,59 +5,146 @@
 # Setup and Configuration -------------------------------------------------
 rm(list = ls(all.names = TRUE))
 options(scipen = 999)
+options(timeout = 1800)
 
 suppressPackageStartupMessages({
   library(purrr)
-  library(curl)
   library(here)
 })
 
 ROOT    <- here::here()
 RAW_DIR <- here::here("data", "raw_data")
-TIMEOUT <- 300
 
-download_file <- function(url, dest_dir, filename = basename(url), timeout = TIMEOUT) {
+# download_file <- function(url, dest_dir, filename = basename(url)) {
+
+#   dir.create(dest_dir, recursive = TRUE, showWarnings = FALSE)
+#   dst <- file.path(dest_dir, filename)
+
+#   if (
+#     filename == "tis_poligonais.zip" &&
+#     file.exists(dst) &&
+#     file.info(dst)$size > 1000
+#   ) {
+
+#     message("FUNAI file already exists. Skipping.")
+#     return(TRUE)
+
+#   }
+
+#   message("Downloading: ", filename)
+
+#   ok <- tryCatch({
+
+#     download.file(
+#       url,
+#       destfile = dst,
+#       mode = "wb",
+#       method = "libcurl"
+#     )
+
+#     if (!file.exists(dst) ||
+#         is.na(file.info(dst)$size) ||
+#         file.info(dst)$size == 0) {
+#       stop("Downloaded file is missing or empty.")
+#     }
+
+#     message("OK: ", filename, " | size=", file.info(dst)$size)
+#     TRUE
+
+#   }, error = function(e) {
+
+#     warning(
+#       "Download failed: ",
+#       filename,
+#       " | ",
+#       conditionMessage(e)
+#     )
+
+#     FALSE
+#   })
+
+#   invisible(ok)
+# }
+
+download_file <- function(
+  url,
+  dest_dir,
+  filename = basename(url),
+  max_attempts = 3
+) {
+
   dir.create(dest_dir, recursive = TRUE, showWarnings = FALSE)
   dst <- file.path(dest_dir, filename)
-  
-  message("Downloading: ", filename)
-  
-  ok <- tryCatch({
-    h <- curl::new_handle(
-      timeout = timeout,
-      connecttimeout = 30,
-      low_speed_time = 30,
-      low_speed_limit = 1
+
+  if (
+    filename == "tis_poligonais.zip" &&
+    file.exists(dst) &&
+    file.info(dst)$size > 1000
+  ) {
+    message("FUNAI file already exists. Skipping.")
+    return(TRUE)
+  }
+
+  for (attempt in seq_len(max_attempts)) {
+
+    message(
+      "Downloading: ",
+      filename,
+      " [",
+      attempt,
+      "/",
+      max_attempts,
+      "]"
     )
-    
-    curl::curl_download(
-      url = url,
-      destfile = dst,
-      mode = "wb",
-      handle = h
-    )
-    
-    if (!file.exists(dst) || is.na(file.info(dst)$size) || file.info(dst)$size == 0) {
-      stop("Downloaded file is missing or empty.")
+
+    ok <- tryCatch({
+
+      download.file(
+        url,
+        destfile = dst,
+        mode = "wb",
+        method = "libcurl"
+      )
+
+      if (!file.exists(dst) ||
+          is.na(file.info(dst)$size) ||
+          file.info(dst)$size == 0) {
+        stop("Downloaded file is missing or empty.")
+      }
+
+      TRUE
+
+    }, error = function(e) {
+
+      warning(
+        "Attempt ",
+        attempt,
+        " failed: ",
+        filename,
+        " | ",
+        conditionMessage(e)
+      )
+
+      FALSE
+    })
+
+    if (ok) {
+      message("OK: ", filename)
+      return(TRUE)
     }
-    
-    message("OK: ", filename, " | size=", file.info(dst)$size)
-    TRUE
-  }, error = function(e) {
-    warning("Download failed: ", filename, " | ", conditionMessage(e))
-    FALSE
-  })
-  
-  invisible(ok)
+
+    Sys.sleep(runif(1, 5, 15))
+  }
+
+  FALSE
 }
 
-download_named_urls <- function(named_urls, dest_dir, timeout = TIMEOUT) {
+download_named_urls <- function(named_urls, dest_dir) {
   purrr::imap(named_urls, ~{
     ok <- download_file(
       url = .x,
       dest_dir = dest_dir,
-      filename = .y,
-      timeout = timeout
+      filename = .y
     )
     
     Sys.sleep(runif(1, 1, 3))
@@ -147,6 +234,7 @@ config_geo <- list(
   funai = list(
     dest = "geo_funai",
     urls = c(
+      # https://metadados.inde.gov.br/geonetwork/srv/por/catalog.search#/metadata/63019b03-0937-4461-a6ed-abef1457c1a1
       "tis_poligonais.zip" =
         "https://geoserver.funai.gov.br/geoserver/Funai/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=Funai%3Atis_poligonais&maxFeatures=10000&outputFormat=SHAPE-ZIP"
     )
@@ -154,12 +242,14 @@ config_geo <- list(
   ambiental_federal = list(
     dest = "geo_federal",
     urls = c(
+      # https://dados.mma.gov.br/dataset/unidadesdeconservacao
+      # https://www.gov.br/icmbio/pt-br/dados-icmbio/dados_geoespaciais/mapa-tematico-e-dados-geoestatisticos-das-unidades-de-conservacao-federais
       "shp_cnuc_2025_08.zip" =
-        "https://dados.mma.gov.br/dataset/44b6dc8a-dc82-4a84-8d95-1b0da7c85dac/resource/7a142cc0-dae9-4a0b-8180-3016994d2932/download/shp_cnuc_2025_08.zip",
+        "https://dados.mma.gov.br/dataset/44b6dc8a-dc82-4a84-8d95-1b0da7c85dac/resource/6ba9a557-87e8-4882-acb7-b3e0f0ea192d/download/shp_cnuc_2025_08.zip",
       "embargos_icmbio.zip" =
-        "https://www.gov.br/icmbio/pt-br/assuntos/dados_geoespaciais/mapa-tematico-e-dados-geoestatisticos-das-unidades-de-conservacao-federais/embargos_icmbio_shp.zip",
+        "https://www.gov.br/icmbio/pt-br/dados-icmbio/dados_geoespaciais/mapa-tematico-e-dados-geoestatisticos-das-unidades-de-conservacao-federais/embargos_icmbio_shp.zip",
       "autos_infracao_icmbio.zip" =
-        "https://www.gov.br/icmbio/pt-br/assuntos/dados_geoespaciais/mapa-tematico-e-dados-geoestatisticos-das-unidades-de-conservacao-federais/autos_infracao_icmbio_shp.zip"
+        "https://www.gov.br/icmbio/pt-br/dados-icmbio/dados_geoespaciais/mapa-tematico-e-dados-geoestatisticos-das-unidades-de-conservacao-federais/autos_infracao_icmbio_shp.zip"
     )
   ),
   ibama = list(
@@ -208,7 +298,7 @@ targets <- c(anm_targets, geo_targets)
 
 results_list <- purrr::map(targets, \(t) {
   message("\n--- Target: ", t$name, " ---")
-  download_named_urls(t$urls, t$dest, timeout = TIMEOUT)
+  download_named_urls(t$urls, t$dest)
 })
 
 # Finish ---------------------------------------------------------------------
