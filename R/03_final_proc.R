@@ -760,7 +760,7 @@ cfem_final <- dplyr::left_join(cfem_arr_amzl3, cfem_corr_join, by = "row_id") |>
   ) |>
   dplyr::mutate(
     ULT_EV_ID  = stringr::str_extract(ULT_EVENTO, "^\\d+"),
-    ULT_EV_DAT = stringr::str_extract(ULT_EVENTO, "\\d{2}/\\d{2}/\\d{4}$"),
+    ULT_EV_DAT = as.Date(stringr::str_extract(ULT_EVENTO, "\\d{2}/\\d{2}/\\d{4}$"), format = "%d/%m/%Y"),
     ULT_EV_DES = stringr::str_trim(stringr::str_remove_all(
       ULT_EVENTO, paste0(ULT_EV_ID, " - |EM ", ULT_EV_DAT)))
   )

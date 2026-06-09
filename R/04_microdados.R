@@ -42,6 +42,30 @@ ler_micro <- function(arquivo) {
   )
 }
 
+# Converte texto com vírgula decimal ("30000,00") para número (30000.00).
+converter_virgula_decimal <- function(df) {
+  for (col in names(df)) {
+    v <- df[[col]]
+    if (!is.character(v)) next
+    nao_nulos <- v[!is.na(v) & v != ""]
+    if (length(nao_nulos) == 0) next
+    if (all(stringr::str_detect(nao_nulos, "^-?[0-9]+,[0-9]+$"))) {
+      df[[col]] <- as.numeric(stringr::str_replace(v, ",", "."))
+    }
+  }
+  df
+}
+
+# Converte colunas de data (formato "AAAA-MM-DD HH:MM:SS") para Date.
+# Aplica-se a toda coluna cujo nome começa com "dt".
+converter_datas <- function(df) {
+  cols_data <- names(df)[stringr::str_starts(names(df), "dt")]
+  for (col in cols_data) {
+    df[[col]] <- as.Date(df[[col]])   # ignora a parte de hora "00:00:00"
+  }
+  df
+}
+
 # Lista de processos da Amazônia
 caminho_ckpt <- file.path(CKPT_DIR, "03_processos_amzl.rds")
 if (!file.exists(caminho_ckpt)) {
@@ -100,6 +124,8 @@ for (arq in names(arquivos_fato)) {
 
   df <- ler_micro(arq)
   names(df) <- tolower(names(df))
+  df <- converter_virgula_decimal(df)
+  df <- converter_datas(df)
   n_orig <- nrow(df)
 
   # cria a chave limpa e filtra pela Amazônia
@@ -126,6 +152,8 @@ for (arq in names(arquivos_inteiros)) {
 
   df <- ler_micro(arq)
   names(df) <- tolower(names(df))
+  df <- converter_virgula_decimal(df)
+  df <- converter_datas(df)
 
   out <- file.path(OUT_DIR, paste0(tabela, ".parquet"))
   arrow::write_parquet(df, out)
