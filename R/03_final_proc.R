@@ -335,8 +335,8 @@ muni_ibge <- terra::vect(list.files(MUNI_DIR, pattern = "\\.shp$", full.names = 
 centroides <- terra::centroids(pma_amzl, inside = TRUE)
 
 nm_ibge   <- names(muni_ibge)
-col_nmmun <- nm_ibge[stringr::str_detect(nm_ibge, "NM_MUN")][1]
-col_ufmun <- nm_ibge[stringr::str_detect(nm_ibge, "SIGLA_UF|UF")][1]
+col_nmmun <- "NM_MUN"
+col_ufmun <- "SIGLA_UF"
 
 cent_mun <- terra::intersect(centroides, muni_ibge) |>
   as.data.frame() |>
@@ -880,7 +880,8 @@ terra::writeVector(qui_amzl, file.path(RESULT_SHINY, "qui_amzl.shp"), overwrite 
 readr::write_csv(cfem_final, file.path(RESULT_SHINY, "cfem_amzl_ALLminerals_GOLD_CASScorrected.csv"))
 
 # ---- 8.2 GEE (recorte pelo BIOMA Amazônia) ----------------------------------
-bioma <- terra::vect(list.files(BIOMA_DIR, pattern = "\\.shp$", full.names = TRUE)[1]) |>
+bioma_full <- terra::vect(list.files(BIOMA_DIR, pattern = "\\.shp$", full.names = TRUE)[1])
+bioma <- bioma_full[bioma_full$Bioma == "Amazônia", ] |>
   terra::project(terra::crs(pma_full))
 dentro_bioma    <- terra::is.related(pma_full, bioma, "intersects")
 pma_bioma       <- pma_full[dentro_bioma, ]
@@ -903,17 +904,17 @@ cols_drop_db <- c(
 )
 pma_db <- pma_full |> dplyr::select(-dplyr::any_of(cols_drop_db))
 
-# Renomeia colunas geográficas remanescentes para nomes curtos (só no DB).
+# Renomeia colunas geográficas remanescentes para nomes curtos.
 rename_db <- c(name_muni = "munic_pma", abbrev_state = "uf_pma",
                name_state = "estado", name_region = "regiao", code_muni = "cod_munic")
 for (old in names(rename_db)) {
   if (old %in% names(pma_db)) names(pma_db)[names(pma_db) == old] <- rename_db[[old]]
 }
 
-terra::writeVector(pma_db,  file.path(RESULT_DB, "pma_amzl_ALLminerals_final.shp"), overwrite = TRUE)
-terra::writeVector(ti_amzl,  file.path(RESULT_DB, "ti_amzl.shp"),  overwrite = TRUE)
-terra::writeVector(uc_amzl,  file.path(RESULT_DB, "uc_amzl.shp"),  overwrite = TRUE)
-terra::writeVector(qui_amzl, file.path(RESULT_DB, "qui_amzl.shp"), overwrite = TRUE)
+terra::writeVector(pma_db,      file.path(RESULT_DB, "pma_amzl_ALLminerals_final.geojson"), filetype = "GeoJSON", overwrite = TRUE)
+terra::writeVector(ti_amzl,     file.path(RESULT_DB, "ti_amzl.geojson"),  filetype = "GeoJSON", overwrite = TRUE)
+terra::writeVector(uc_amzl,     file.path(RESULT_DB, "uc_amzl.geojson"),  filetype = "GeoJSON", overwrite = TRUE)
+terra::writeVector(qui_amzl,    file.path(RESULT_DB, "qui_amzl.geojson"), filetype = "GeoJSON", overwrite = TRUE)
 readr::write_csv(cfem_final,    file.path(RESULT_DB, "cfem_amzl_ALLminerals_GOLD_CASScorrected.csv"))
 readr::write_csv(cfem_aut_amzl, file.path(RESULT_DB, "cfem_aut_all_min_amzl.csv"))
 
