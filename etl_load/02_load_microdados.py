@@ -1,84 +1,77 @@
 """
-ETL Load — Microdados SCM completo
-Carrega TODOS os arquivos TXT dos microdados no PostGIS
+02_load_microdados.py
+  Lê os .parquet de data/result_db/microdados/ (gerados pelo 04_microdados.R)
+  e INSERE nas tabelas já criadas pelo 01_schema.sql (if_exists="append").
 """
 
+import os
 import pandas as pd
 from sqlalchemy import create_engine
-from pathlib import Path
 
 DB_URL = "postgresql://postgres:0101@localhost:5432/anm_geo"
 engine = create_engine(DB_URL)
 
-ROOT      = Path("C:/GP/anm-geo")
-MICRO_DIR = ROOT / "data" / "raw_data" / "anm_microdados" / "microdados-scm"
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+MICRO_DIR = os.path.join(ROOT, "data", "result_db", "microdados")
 
-def log(msg):
-    print(f"[MICRO] {msg}")
+MAPA = {
+    # mestre
+    "micro_processo.parquet":                 "micro_processo",
+    # fatos
+    "micro_processo_evento.parquet":          "micro_processo_evento",
+    "micro_processo_pessoa.parquet":          "micro_processo_pessoa",
+    "micro_processo_substancia.parquet":      "micro_processo_substancia",
+    "micro_processo_municipio.parquet":       "micro_processo_municipio",
+    "micro_processo_titulo.parquet":          "micro_processo_titulo",
+    "micro_processo_documentacao.parquet":    "micro_processo_documentacao",
+    "micro_processo_associacao.parquet":      "micro_processo_associacao",
+    "micro_processo_propriedade_solo.parquet":"micro_processo_propriedade_solo",
+    # lookups
+    "micro_municipio.parquet":                "micro_municipio",
+    "micro_pessoa.parquet":                   "micro_pessoa",
+    "micro_evento.parquet":                   "micro_evento",
+    "micro_fase_processo.parquet":            "micro_fase_processo",
+    "micro_substancia.parquet":               "micro_substancia",
+    "micro_tipo_requerimento.parquet":        "micro_tipo_requerimento",
+    "micro_tipo_associacao.parquet":          "micro_tipo_associacao",
+    "micro_tipo_documento.parquet":           "micro_tipo_documento",
+    "micro_tipo_documento_legal.parquet":     "micro_tipo_documento_legal",
+    "micro_tipo_relacao.parquet":             "micro_tipo_relacao",
+    "micro_tipo_representacao_legal.parquet": "micro_tipo_representacao_legal",
+    "micro_tipo_responsabilidade_tecnica.parquet": "micro_tipo_responsabilidade_tecnica",
+    "micro_tipo_uso_substancia.parquet":      "micro_tipo_uso_substancia",
+    "micro_condicao_propriedade_solo.parquet":"micro_condicao_propriedade_solo",
+    "micro_motivo_encerramento_substancia.parquet": "micro_motivo_encerramento_substancia",
+    "micro_situacao_documento_legal.parquet": "micro_situacao_documento_legal",
+    "micro_documento_legal.parquet":          "micro_documento_legal",
+    "micro_unidade_administrativa.parquet":   "micro_unidade_administrativa",
+    "micro_unidade_protocolizadora.parquet":  "micro_unidade_protocolizadora",
+}
 
-def read_txt(filename):
-    path = MICRO_DIR / filename
-    log(f"Lendo {filename} ({path.stat().st_size / 1024 / 1024:.1f} MB)...")
-    for enc in ["Windows-1252", "utf-8", "latin-1", "cp850"]:
-        try:
-            df = pd.read_csv(path, sep=";", encoding=enc,
-                           dtype=str, low_memory=False)
-            log(f"  encoding OK: {enc} | {len(df)} registros")
-            return df
-        except UnicodeDecodeError:
-            continue
+# --- Carga -------------------------------------------------------------------
+def carregar(arquivo, tabela):
+    caminho = os.path.join(MICRO_DIR, arquivo)
+    if not os.path.exists(caminho):
+        print(f"   AVISO: {arquivo} não encontrado. Pulando.")
+        return
+    print(f"\n[micro] {arquivo} -> {tabela}")
+    df = pd.read_parquet(caminho)
 
-    return pd.read_csv(path, sep=";", encoding="utf-8",
-                      errors="ignore", dtype=str, low_memory=False)
+    df.columns = [c.lower() for c in df.columns]
 
-def load(filename, tablename):
-    try:
-        df = read_txt(filename)
-        df.columns = [c.lower() for c in df.columns]
-        df.to_sql(tablename, engine, if_exists="replace",
-                  index=False, chunksize=10000)
-        log(f"  ✅ {tablename}: {len(df)} registros carregados")
-    except Exception as e:
-        log(f"  ❌ {tablename} ERRO: {e}")
+    # NaN/NaT -> None (NULL no banco). object_cols evita estragar datas.
+    df = df.astype(object).where(pd.notnull(df), None)
 
-# =============================================================================
-# Tabelas principais (grandes)
-# =============================================================================
-load("Processo.txt",               "micro_processo")
-load("ProcessoEvento.txt",         "micro_processo_evento")
-load("ProcessoPessoa.txt",         "micro_processo_pessoa")
-load("ProcessoSubstancia.txt",     "micro_processo_substancia")
-load("ProcessoMunicipio.txt",      "micro_processo_municipio")
-load("ProcessoTitulo.txt",         "micro_processo_titulo")
-load("ProcessoDocumentacao.txt",   "micro_processo_documentacao")
-load("ProcessoAssociacao.txt",     "micro_processo_associacao")
-load("ProcessoPropriedadeSolo.txt","micro_processo_propriedade_solo")
+    df.to_sql(tabela, engine, if_exists="append", index=False, chunksize=10000)
+    print(f"   {len(df)} linhas inseridas.")
 
-# =============================================================================
-# Tabelas de pessoas
-# =============================================================================
-load("Pessoa.txt",                 "micro_pessoa")
 
-# =============================================================================
-# Tabelas de lookup (pequenas — dicionários)
-# =============================================================================
-load("Municipio.txt",                    "micro_municipio")
-load("Evento.txt",                       "micro_evento")
-load("FaseProcesso.txt",                 "micro_fase_processo")
-load("Substancia.txt",                   "micro_substancia")
-load("TipoRequerimento.txt",             "micro_tipo_requerimento")
-load("TipoAssociacao.txt",               "micro_tipo_associacao")
-load("TipoDocumento.txt",                "micro_tipo_documento")
-load("TipoDocumentoLegal.txt",           "micro_tipo_documento_legal")
-load("TipoRelacao.txt",                  "micro_tipo_relacao")
-load("TipoRepresentacaoLegal.txt",       "micro_tipo_representacao_legal")
-load("TipoResponsabilidadeTecnica.txt",  "micro_tipo_responsabilidade_tecnica")
-load("TipoUsoSubstancia.txt",            "micro_tipo_uso_substancia")
-load("CondicaoPropriedadeSolo.txt",      "micro_condicao_propriedade_solo")
-load("MotivoEncerramentoSubstancia.txt", "micro_motivo_encerramento_substancia")
-load("SituacaoDocumentoLegal.txt",       "micro_situacao_documento_legal")
-load("DocumentoLegal.txt",               "micro_documento_legal")
-load("UnidadeAdministrativaRegional.txt","micro_unidade_administrativa")
-load("UnidadeProtocolizadora.txt",       "micro_unidade_protocolizadora")
+if __name__ == "__main__":
+    total = len(MAPA)
+    i = 0
+    for arquivo, tabela in MAPA.items():
+        i += 1
+        print(f"[{i}/{total}]", end=" ")
+        carregar(arquivo, tabela)
 
-log("=== TODOS OS MICRODADOS CARREGADOS ===")
+    print("\n=== Carga de microdados concluída ===")
