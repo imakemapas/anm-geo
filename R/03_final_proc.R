@@ -35,6 +35,8 @@ suppressPackageStartupMessages({
   library(stringr)
   library(glue)
   library(here)
+  library(ggplot2)
+  library(patchwork)
 })
 
 # --- Caminhos -----------------------------------------------------------------
@@ -721,8 +723,7 @@ suggest_weight_row <- function(VALORtot, PESO_G, med_preco,
 # Correção do OURO
 cfem_arr_amzl4 <- cfem_arr_amzl3 |>
   dplyr::filter(SUBSarrSIM == "OURO" &
-                  FASE %in% c("LAVRA GARIMPEIRA","REQUERIMENTO DE LAVRA GARIMPEIRA",
-                              "CONCESSÃO DE LAVRA","REQUERIMENTO DE LAVRA","AUTORIZAÇÃO DE PESQUISA"))
+                  FASE %in% c("LAVRA GARIMPEIRA","REQUERIMENTO DE LAVRA GARIMPEIRA","AUTORIZAÇÃO DE PESQUISA"))
 
 med_info <- compute_median_hierarchical(
   cfem_arr_amzl4, preco_col = "preco_g_orig",
@@ -768,19 +769,18 @@ cfem_final <- dplyr::left_join(cfem_arr_amzl3, cfem_corr_join, by = "row_id") |>
 # Correção da CASSITERITA
 cfem_final <- cfem_final |> dplyr::mutate(row_id = dplyr::row_number())
 
-max_mediana_plausivel <- 1.0      # cassiterita vale ~0,06 R$/g
-min_mediana_plausivel <- 0.001
+max_mediana_plausivel_cass <- 0.15
+min_mediana_plausivel_cass <- 0.02
 
 cass_amzl4 <- cfem_final |>
   dplyr::filter(SUBSarr == "CASSITERITA" &
-                  FASE %in% c("LAVRA GARIMPEIRA","REQUERIMENTO DE LAVRA GARIMPEIRA",
-                              "CONCESSÃO DE LAVRA","REQUERIMENTO DE LAVRA","AUTORIZAÇÃO DE PESQUISA"))
+                  FASE %in% c("LAVRA GARIMPEIRA","REQUERIMENTO DE LAVRA GARIMPEIRA","AUTORIZAÇÃO DE PESQUISA"))
 
 med_info_cass <- compute_median_hierarchical(
   cass_amzl4, preco_col = "preco_g_orig",
   min_muni = min_grp_muni, min_state = min_grp_state, min_month = min_grp_month,
   min_ano = min_grp_ano, min_global = min_grp_global,
-  max_med_plaus = max_mediana_plausivel, min_med_plaus = min_mediana_plausivel
+  max_med_plaus = max_mediana_plausivel_cass, min_med_plaus = min_mediana_plausivel_cass
 )
 
 cass_amzl5 <- cass_amzl4 |>
@@ -816,6 +816,209 @@ cfem_final <- cfem_final |> dplyr::select(-dplyr::any_of("row_id"))
 
 save_ckpt(cfem_final,    "06_cfem_final")
 save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(patchwork)
+  library(stringr)
+  library(dplyr)
+  library(tidyr)
+})
+
+# =============================================================================
+# VISUALIZAÇÃO 1: Séries Temporais (Valores, Pesos e Preços Implícitos)
+# =============================================================================
+
+# Preparação da base comum para as linhas temporais
+df_base <- cfem_final |>
+  dplyr::filter(SUBSarrSIM %in% c("OURO") | SUBSarr == "CASSITERITA") |>
+  dplyr::filter(
+    str_detect(toupper(FASE), "GARIMPEIRA") | 
+    str_detect(toupper(FASE), "REQUERIMENTO DE LAVRA")
+  ) |> # <-- CORRIGIDO: Parêntese fechado corretamente antes do pipe
+  dplyr::mutate(
+    substancia_plot = dplyr::if_else(SUBSarr == "CASSITERITA", "CASSITERITA", "OURO"),
+    data = as.Date(sprintf("%04d-%02d-01", ANO, MES))
+  )
+
+# CENÁRIO ORIGINAL (COM ERROS DE DIGITAÇÃO)
+df_original <- df_base |>
+  dplyr::group_by(substancia_plot, data) |>
+  dplyr::summarise(
+    `1. Valor Arrecadado (R$)`   = sum(VALORarr, na.rm = TRUE),
+    `2. Peso Declarado (Kg)`     = sum(PESO_KG, na.rm = TRUE),
+    `3. Relação de Preço (R$/Kg)` = dplyr::if_else(sum(PESO_KG, na.rm = TRUE) > 0, 
+                                                   sum(VALORtot, na.rm = TRUE) / sum(PESO_KG, na.rm = TRUE), 
+                                                   NA_real_),
+    .groups = "drop"
+  ) |>
+  tidyr::pivot_longer(
+    cols = c(`1. Valor Arrecadado (R$)`, `2. Peso Declarado (Kg)`, `3. Relação de Preço (R$/Kg)`),
+    names_to = "metrica",
+    values_to = "valor_metrica"
+  ) |>
+  dplyr::filter(!is.na(valor_metrica) & valor_metrica > 0)
+
+p1 <- ggplot(df_original, aes(x = data, y = valor_metrica)) +
+  geom_line(color = "#e74c3c", size = 0.8) +
+  geom_point(color = "#e74c3c", size = 1.2) +
+  scale_y_log10(labels = scales::label_comma()) +
+  facet_grid(substancia_plot ~ metrica, scales = "free_y") +
+  theme_bw() +
+  labs(
+    title = "Cenário 1: Séries Temporais Originais (Dados Brutos ANM)",
+    subtitle = "Presença de picos artificiais causados por erros nas unidades de medida",
+    x = NULL,
+    y = "Valores (Escala Log10)"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# CENÁRIO CORRIGIDO (PÓS-ALGORITMO POW10)
+df_corrigido <- df_base |>
+  dplyr::group_by(substancia_plot, data) |>
+  dplyr::summarise(
+    `1. Valor Arrecadado (R$)`   = sum(VALORarr, na.rm = TRUE),
+    `2. Peso Declarado (Kg)`     = sum(PESO_KG_final, na.rm = TRUE),
+    `3. Relação de Preço (R$/Kg)` = dplyr::if_else(sum(PESO_KG_final, na.rm = TRUE) > 0, 
+                                                   sum(VALORtot, na.rm = TRUE) / sum(PESO_KG_final, na.rm = TRUE), 
+                                                   NA_real_),
+    .groups = "drop"
+  ) |>
+  tidyr::pivot_longer(
+    cols = c(`1. Valor Arrecadado (R$)`, `2. Peso Declarado (Kg)`, `3. Relação de Preço (R$/Kg)`),
+    names_to = "metrica",
+    values_to = "valor_metrica"
+  ) |>
+  dplyr::filter(!is.na(valor_metrica) & valor_metrica > 0)
+
+p2 <- ggplot(df_corrigido, aes(x = data, y = valor_metrica)) +
+  geom_line(color = "#27ae60", size = 0.8) +
+  geom_point(color = "#27ae60", size = 1.2) +
+  scale_y_log10(labels = scales::label_comma()) +
+  facet_grid(substancia_plot ~ metrica, scales = "free_y") +
+  theme_bw() +
+  labs(
+    title = "Cenário 2: Séries Temporais Corrigidas (Pós-Saneamento)",
+    subtitle = "Pesos reais alinhados e estabilização da linha de preço de mercado",
+    x = "Data de Referência",
+    y = "Valores (Escala Log10)"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Renderiza o Antes e Depois das linhas verticais
+p1 / p2
+
+
+# =============================================================================
+# VISUALIZAÇÃO 2: Dispersão de Preços Individuais por Fase do Garimpo
+# =============================================================================
+
+# 1. Preparar os dados para a matriz de dispersão de preços
+df_plot <- cfem_final |>
+  dplyr::filter(SUBSarrSIM %in% c("OURO") | SUBSarr == "CASSITERITA") |>
+  dplyr::filter(
+    str_detect(toupper(FASE), "GARIMPEIRA") | 
+    str_detect(toupper(FASE), "REQUERIMENTO DE LAVRA") # <-- CORRIGIDO: Removido a string de pesquisa solta
+  ) |>
+  dplyr::mutate(
+    substancia_plot = dplyr::if_else(SUBSarr == "CASSITERITA", "CASSITERITA", "OURO"),
+    data = as.Date(sprintf("%04d-%02d-01", ANO, MES)), # <-- CORRIGIDO: Adicionado a coluna data que faltava
+    status_correcao = dplyr::case_when(
+      corr == "original" ~ "Mantido (Original)",
+      TRUE ~ "Corrigido (pow10)"
+    ),
+    # Padronizando os nomes das fases de garimpo para as colunas do facet
+    FASE_plot = dplyr::if_else(
+      str_detect(toupper(FASE), "REQUERIMENTO"),
+      "REQUERIMENTO",
+      "LAVRA GARIMPEIRA"
+    ) # <-- CORRIGIDO: reestruturado com argumentos corretos (Condição, Se Sim, Se Não)
+  ) |>
+  dplyr::filter(!is.na(preco_g_orig) & !is.na(preco_g_final) & preco_g_orig > 0 & preco_g_final > 0)
+
+# 2. Gráfico do PREÇO ORIGINAL (Antes)
+p_orig <- ggplot(df_plot, aes(x = data, y = preco_g_orig, color = status_correcao)) +
+  geom_point(alpha = 0.5, size = 1.2) +
+  scale_y_log10(labels = scales::label_comma(accuracy = 0.01),
+                breaks = scales::trans_breaks("log10", function(x) 10^x)) +
+  facet_grid(substancia_plot ~ FASE_plot, scales = "free_y") +
+  scale_color_manual(values = c("Mantido (Original)" = "#34495e", "Corrigido (pow10)" = "#e74c3c")) +
+  theme_bw() +
+  labs(
+    title = "Preço Original (R$/g) no Garimpo",
+    subtitle = "Antes da correção",
+    x = NULL, 
+    y = "Preço Log10",
+    color = "Status"
+  ) +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 3. Gráfico do PREÇO FINAL (Depois)
+p_final <- ggplot(df_plot, aes(x = data, y = preco_g_final, color = status_correcao)) +
+  geom_point(alpha = 0.5, size = 1.2) +
+  scale_y_log10(labels = scales::label_comma(accuracy = 0.01),
+                breaks = scales::trans_breaks("log10", function(x) 10^x)) +
+  facet_grid(substancia_plot ~ FASE_plot, scales = "free_y") +
+  scale_color_manual(values = c("Mantido (Original)" = "#34495e", "Corrigido (pow10)" = "#27ae60")) +
+  theme_bw() +
+  labs(
+    title = "Preço Pós-Correção (R$/g) no Garimpo",
+    subtitle = "Realinhado às potências de 10",
+    x = "Data", 
+    y = "Preço Log10",
+    color = "Status"
+  ) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 4. Renderizar um embaixo do outro
+p_orig / p_final
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # =============================================================================
