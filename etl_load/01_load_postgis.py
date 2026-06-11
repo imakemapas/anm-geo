@@ -48,13 +48,18 @@ def carregar_geojson(arquivo, tabela):
  
     cols = [c for c in gdf.columns if c != "geom"]
     
-    # converte as decimais geradas pelo Pandas de volta para "Inteiros que aceitam Nulos" (Int64)
-    for col in cols:
-        if gdf[col].dtype == 'float64':
-            try:
-                gdf[col] = gdf[col].astype('Int64')
-            except TypeError:
-                pass
+    # # converte as decimais geradas pelo Pandas de volta para "Inteiros que aceitam Nulos" (Int64)
+    # for col in cols:
+    #     if gdf[col].dtype == 'float64':
+    #         try:
+    #             gdf[col] = gdf[col].astype('Int64')
+    #         except TypeError:
+    #             pass
+    
+    cols_inteiras = ["n_munic", "arr_ndcl", "arr_nbuy"]
+    for col in cols_inteiras:
+        if col in gdf.columns:
+            gdf[col] = gdf[col].astype('Int64')
 
     gdf[cols] = gdf[cols].where(pd.notnull(gdf[cols]), None)
  
