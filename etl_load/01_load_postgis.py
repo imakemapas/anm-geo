@@ -38,7 +38,6 @@ def carregar_geojson(arquivo, tabela):
     gdf = gpd.read_file(caminho, engine="fiona")
     gdf.columns = [c.lower() for c in gdf.columns]
  
-    # O R já salvou em 4326. Marca o CRS; converte só se vier outro.
     if gdf.crs is None:
         gdf = gdf.set_crs(4326, allow_override=True)
     elif gdf.crs.to_epsg() != 4326:
@@ -48,19 +47,25 @@ def carregar_geojson(arquivo, tabela):
  
     cols = [c for c in gdf.columns if c != "geom"]
     
-    # # converte as decimais geradas pelo Pandas de volta para "Inteiros que aceitam Nulos" (Int64)
-    # for col in cols:
-    #     if gdf[col].dtype == 'float64':
-    #         try:
-    #             gdf[col] = gdf[col].astype('Int64')
-    #         except TypeError:
-    #             pass
-    
-    cols_inteiras = ["n_munic", "arr_ndcl", "arr_nbuy"]
-    for col in cols_inteiras:
+    cols_booleanas = ["tiov", "ucov", "quiov", "tiov10km", "ucov2_10km", "quiov10km"]
+    for col in cols_booleanas:
         if col in gdf.columns:
-            gdf[col] = gdf[col].astype('Int64')
+            gdf[col] = gdf[col].fillna(0).astype(bool)
 
+    for col in cols:
+        if gdf[col].dtype == 'float64':
+            try:
+                gdf[col] = gdf[col].astype('Int64')
+            except TypeError:
+                pass
+            
+    for col in cols:
+        if gdf[col].dtype == 'float64':
+            try:
+                gdf[col] = gdf[col].astype('Int64')
+            except TypeError:
+                pass
+    
     gdf[cols] = gdf[cols].where(pd.notnull(gdf[cols]), None)
  
     gdf.to_postgis(tabela, engine, if_exists="append", index=False)

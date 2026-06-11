@@ -1,18 +1,10 @@
 -- ============================================================================
--- 03_indexes.sql  —  índices para acelerar junções, filtros e operações espaciais
+-- 03_indexes.sql 
 -- ----------------------------------------------------------------------------
 -- Roda DEPOIS de 02_constraints.sql. Conectar ao anm_geo.
--- Índices não mudam resultados; só deixam as consultas rápidas. CREATE INDEX
--- IF NOT EXISTS é idempotente (pode rodar de novo sem erro).
+-- Índices não mudam resultados; só deixam as consultas rápidas.
 -- ============================================================================
 
--- ----------------------------------------------------------------------------
--- A0) GEOMETRIA MÉTRICA (EPSG:5880) — derivada da geom 4326
---     Reprojeção é operação mecânica do PostGIS (não é regra de negócio), então
---     mora aqui, no script de aceleração que roda sempre na atualização.
---     A mv_sobreposicoes usa estas colunas direto — sem ST_Transform em tempo de
---     consulta, que cegaria o índice GiST e deixaria a view lenta.
--- ----------------------------------------------------------------------------
 ALTER TABLE processos            ADD COLUMN IF NOT EXISTS geom_5880 geometry(MultiPolygon,5880);
 ALTER TABLE terras_indigenas     ADD COLUMN IF NOT EXISTS geom_5880 geometry(MultiPolygon,5880);
 ALTER TABLE unidades_conservacao ADD COLUMN IF NOT EXISTS geom_5880 geometry(MultiPolygon,5880);
@@ -35,6 +27,34 @@ CREATE INDEX IF NOT EXISTS gix_processos_geom5880            ON processos       
 CREATE INDEX IF NOT EXISTS gix_terras_indigenas_geom5880     ON terras_indigenas     USING GIST (geom_5880);
 CREATE INDEX IF NOT EXISTS gix_unidades_conservacao_geom5880 ON unidades_conservacao USING GIST (geom_5880);
 CREATE INDEX IF NOT EXISTS gix_quilombolas_geom5880          ON quilombolas          USING GIST (geom_5880);
+
+-- ----------------------------------------------------------------------------
+-- A1) GEOMETRIAS PROTEGIDAS SUBDIVIDIDAS (ST_Subdivide) — aceleram a sobreposição
+-- ----------------------------------------------------------------------------
+DROP TABLE IF EXISTS ti_subdiv CASCADE;
+CREATE TABLE ti_subdiv AS
+SELECT terrai_nom, etnia_nome, fase_ti,
+       ST_Subdivide(geom_5880, 256) AS geom_5880
+FROM terras_indigenas
+WHERE geom_5880 IS NOT NULL;
+CREATE INDEX gix_ti_subdiv_geom5880 ON ti_subdiv USING GIST (geom_5880);
+
+DROP TABLE IF EXISTS uc_subdiv CASCADE;
+CREATE TABLE uc_subdiv AS
+SELECT nome_uc, sigla_snuc, grupo, categoria, pl_manejo,
+       ST_Subdivide(geom_5880, 256) AS geom_5880
+FROM unidades_conservacao
+WHERE geom_5880 IS NOT NULL
+  AND (upper(grupo) = 'PROTEÇÃO INTEGRAL' OR upper(sigla_snuc) = 'RESEX');
+CREATE INDEX gix_uc_subdiv_geom5880 ON uc_subdiv USING GIST (geom_5880);
+
+DROP TABLE IF EXISTS qui_subdiv CASCADE;
+CREATE TABLE qui_subdiv AS
+SELECT nm_comunid, nm_municip, nr_familia,
+       ST_Subdivide(geom_5880, 256) AS geom_5880
+FROM quilombolas
+WHERE geom_5880 IS NOT NULL;
+CREATE INDEX gix_qui_subdiv_geom5880 ON qui_subdiv USING GIST (geom_5880);
 
 -- ----------------------------------------------------------------------------
 -- B) COLUNAS DE JUNÇÃO (processo / dsprocesso)

@@ -1,0 +1,1 @@
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='anm_geo' AND pid<>pg_backend_pid();

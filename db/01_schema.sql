@@ -1,11 +1,8 @@
 -- ============================================================================
 -- 01_schema.sql  —  cria tabelas VAZIAS, com tipos fortes e PKs
 -- ----------------------------------------------------------------------------
--- Abordagem robusta: o SQL define a estrutura; o Python só insere (append).
+-- o SQL define a estrutura; o Python só insere (append).
 -- Rode conectado ao anm_geo:   \c anm_geo   depois   \i 01_schema.sql
---
--- Chaves estrangeiras NÃO entram aqui — vão no 02_constraints.sql, DEPOIS da
--- carga (uma FK exige que os dados referenciados já existam).
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS postgis;
@@ -18,29 +15,24 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 DROP TABLE IF EXISTS processos CASCADE;
 CREATE TABLE processos (
     processo      TEXT PRIMARY KEY,          -- chave natural, sem ponto
-    fase          TEXT,
-    ult_evento    TEXT,
-    titular       TEXT,
+    titular       TEXT, 
+	cpf_cnpjcm    TEXT,
     subs          TEXT,
+	subspmagrp    TEXT,                      -- grupo mineral padronizado	
+	fase          TEXT,
+	tipo_reqcm    TEXT,
     area_orig     NUMERIC,                   -- área oficial ANM (ha)
     area_ha       NUMERIC,                   -- área geométrica recalculada (ha)
-    tipo_reqcm    TEXT,
-    cpf_cnpjcm    TEXT,
     munic         TEXT,
     uf            TEXT,
     n_munic       INTEGER,
     munic_fonte   TEXT,                      -- microdado / centroide / centroide_sem_micro
-    subspmagrp    TEXT,                      -- grupo mineral padronizado
-    ult_ev_id     TEXT,
-    ult_ev_dat    DATE,
-    ult_ev_des    TEXT,
-    arr_kg_t      NUMERIC,                   -- agregações CFEM por processo
-    arr_kg_l      NUMERIC,
-    arr_g_t       NUMERIC,
-    arr_g_l       NUMERIC,
-    arr_val_t     NUMERIC,
-    arr_ndcl      NUMERIC,
-    arr_nbuy      NUMERIC,
+	tiov          BOOLEAN,
+    ucov          BOOLEAN,
+    quiov         BOOLEAN,
+    tiov10km      BOOLEAN,
+    ucov2_10km    BOOLEAN,
+    quiov10km     BOOLEAN,
     geom          GEOMETRY(MultiPolygon, 4326)
 );
 

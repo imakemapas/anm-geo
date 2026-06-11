@@ -578,6 +578,13 @@ pessoa <- readr::read_delim(
   dplyr::distinct(CPF_CNPJarr, .keep_all = TRUE) |>
   dplyr::mutate(NOME_arr = toupper(NOME_arr))
 
+# Razão social via dado intenro GP (fallback p/ quem não está em Pessoa.txt)
+RazaoSocial <- readr::read_csv(file.path(RAW_DIR, "cefem_arrecadacao(semshapes).csv"), show_col_types = FALSE) |>
+  dplyr::rename(CPF_CNPJarr = cnpj_cpf, NOME_arr_alt = razao_social) |>
+  dplyr::select(CPF_CNPJarr, NOME_arr_alt) |>
+  dplyr::distinct(CPF_CNPJarr, .keep_all = TRUE) |>
+  dplyr::mutate(NOME_arr_alt = toupper(NOME_arr_alt))
+
 cfem_arr <- cfem_arr |>
   dplyr::left_join(pessoa, by = "CPF_CNPJarr") |>
   dplyr::mutate(NOME_arr = dplyr::if_else(is.na(NOME_arr), "NOME DESCONHECIDO", NOME_arr))
@@ -819,7 +826,6 @@ cfem_final <- cfem_final |> dplyr::select(-dplyr::any_of("row_id"))
 save_ckpt(cfem_final,    "06_cfem_final")
 save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
 
-
 # # VISUALIZAÇÃO 1 ==============================================================
 
 # df_temporal_unificado <- cfem_final |>
@@ -827,6 +833,7 @@ save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
 #   dplyr::filter(
 #     str_detect(toupper(FASE), "GARIMPEIRA")
 #   ) |> 
+#   #dplyr::filter(data >= as.Date("2018-01-01")) |> 
 #   dplyr::mutate(
 #     substancia_plot = factor(dplyr::if_else(SUBSarr == "CASSITERITA", "CASSITERITA", "OURO"), 
 #                              levels = c("CASSITERITA", "OURO")),
@@ -872,6 +879,7 @@ save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
 #   "Relação R$/kg (original)"      = "#e74c3c",
 #   "Relação R$/kg (depois)"        = "#8e44ad" 
 # )
+
 # p_linhas <- ggplot(df_temporal_unificado, aes(x = data, y = valor_metrica, 
 #                                   color = label_cor, 
 #                                   linetype = cenario, 
@@ -879,7 +887,8 @@ save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
 #   geom_line(size = 0.8) +
 #   geom_point(size = 1.4) +
 #   scale_y_log10(labels = scales::label_comma()) +
-#   facet_wrap(~ substancia_plot + metrica, scales = "free_y", ncol = 3) +
+#   #facet_wrap(~ substancia_plot + metrica, scales = "free_y", ncol = 3) +
+#   facet_grid(metrica ~ substancia_plot, scales = "free_y") +
 #   scale_color_manual(values = cores_customizadas) + 
 #   scale_linetype_manual(values = c("Antes (Original)" = "dashed", "Depois (pow10)" = "solid")) + 
 #   scale_alpha_manual(values = c("Antes (Original)" = 0.4, "Depois (pow10)" = 1.0)) +            
@@ -908,6 +917,7 @@ save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
 # df_scatterplot_clean <- cfem_final |>
 #   dplyr::filter(SUBSarrSIM %in% c("OURO") | SUBSarr == "CASSITERITA") |>
 #   dplyr::filter(str_detect(toupper(FASE), "GARIMPEIRA")) |>
+#   #dplyr::filter(data >= as.Date("2018-01-01")) |>
 #   dplyr::mutate(
 #     substancia_plot = factor(dplyr::if_else(SUBSarr == "CASSITERITA", "CASSITERITA", "OURO"), 
 #                              levels = c("CASSITERITA", "OURO")),
@@ -927,7 +937,7 @@ save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
 
 # cores_scatterplot <- c(
 #   "Dado Original Correto"           = "#34495e",
-#   "Corrigido pelo Algoritmo (pow10)" = "#f39c12"
+#   "Corrigido pelo Algoritmo (pow10)" = "#e74c3c"
 # )
 
 # p_scatter <- ggplot(df_scatterplot_clean, aes(x = data, y = preco_individual, color = status_ponto)) +
@@ -1032,10 +1042,11 @@ readr::write_csv(cfem_bioma_mensal, file.path(RESULT_GEE, "cfem_AMAZONIA_ALLmine
 
 # DB
 cols_drop_db <- c(
-  "TIov","UCov","QUIov","TIov10km","UCov2_10km","QUIov10km",
+  "arr_kg_T","arr_g_T","arr_val_T","arr_ndcl","arr_nbuy", "arr_g_L", "arr_kg_L",
   "UCtype","UCname","TIname","QUIname",
   "UCtype_ov","UCname_ov","TIname_ov","QUIname_ov",
-  "inf_MT","inf_IC","emb_MTa","emb_MTb","emb_IB","emb_IC"
+  "inf_MT","inf_IC","emb_MTa","emb_MTb","emb_IB","emb_IC",
+  "ULT_EV_ID","ULT_EV_DAT","ULT_EV_DES", "ULT_EVENTO"
 )
 pma_db <- pma_full |> dplyr::select(-dplyr::any_of(cols_drop_db))
 
