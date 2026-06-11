@@ -7,7 +7,7 @@
 --   5. mv_historico_titular  — histórico de titulares por processo
 --   6. mv_historico_evento   — linha do tempo administrativa do processo
 -- ----------------------------------------------------------------------------
--- Roda DEPOIS de 03_indexes.sql. Conectar ao anm_geo.
+-- DEPOIS de 03_indexes.sql. Conectar ao anm_geo.
 
 -- ----------------------------------------------------------------------------
 -- VIEW 1: CFEM anual
@@ -56,9 +56,6 @@ CREATE INDEX ix_mv_cfem_mensal_data     ON mv_cfem_mensal (data);
 
 -- ----------------------------------------------------------------------------
 -- VIEW 3: CFEM total por processo
---   Substitui as colunas arr_kg_t/arr_g_t/arr_val_t/arr_ndcl/arr_nbuy que
---   antes vinham prontas do R. Agregação mecânica sobre cfem_eventos (já no
---   banco) -> cabe na exceção de "autonomia de consulta" das views.
 -- ----------------------------------------------------------------------------
 DROP MATERIALIZED VIEW IF EXISTS mv_cfem_total CASCADE;
 CREATE MATERIALIZED VIEW mv_cfem_total AS
