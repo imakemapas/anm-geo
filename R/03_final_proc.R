@@ -81,13 +81,6 @@ load_ckpt <- function(nome) {
 # Remove o ponto do dsprocesso (microdados) p/ casar com 'processo' (SIGMINE).
 limpar_dsprocesso <- function(x) stringr::str_replace_all(as.character(x), "\\.", "")
 
-# Reprojeta p/ métrico (5880), valida e remove geometrias vazias.
-clean_geom_5880 <- function(x) {
-  x <- terra::project(x, "EPSG:5880") # SIRGAS 2000 Polyconic para áreas e bf
-  x <- terra::makeValid(x)
-  x[!terra::is.empty(x), ]
-}
-
 # Lista de grupos minerais: mapeia substância declarada e cria grupo padronizado.
 target_minerals_list <- list(
   ouro         = c("OURO","MINÉRIO DE OURO","OURO NATIVO","OURO PIGMENTO","ALUVIÃO AURÍFERO"),
@@ -552,13 +545,6 @@ save_ckpt(pma_tp, "05_pma_tp")
 # =============================================================================
 # BLOCO 6 — CFEM: limpeza, razão social, alíquotas e correção de peso
 # -----------------------------------------------------------------------------
-# 6.1 Lê arrecadação e autuação, reconstrói o número de processo, padroniza.
-# 6.2 Traz a razão social via Pessoa.txt dos microdados.
-# 6.3 Filtra para os processos da Amazônia Legal (mesma lista do bloco 3).
-# 6.4 Calcula peso (kg/g), grupo mineral, alíquota e preço por grama.
-# 6.5 Correção de peso do OURO (mediana hierárquica + PowerOf10).
-# 6.6 Correção de peso da CASSITERITA (mesma lógica, calibrada).
-# =============================================================================
 
 processos_amzl <- load_ckpt("03_processos_amzl")
 pma_tp         <- load_ckpt("05_pma_tp")
