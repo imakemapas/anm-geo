@@ -377,7 +377,6 @@ pma_amzl <- tidyterra::left_join(pma_amzl, munic_final, by = "PROCESSO")
 
 save_ckpt(pma_amzl, "04_pma_amzl")
 
-
 # =============================================================================
 # BLOCO 5 — INTERSEÇÃO
 # =============================================================================
@@ -387,81 +386,86 @@ ti_amzl  <- load_ckpt("03_ti_amzl")
 uc_amzl  <- load_ckpt("03_uc_amzl")
 qui_amzl <- load_ckpt("03_qui_amzl")
 
-# Reprojeta p/ métrico + valida (clean_geom_5880 evita TopologyException).
-pma_m <- clean_geom_5880(pma_amzl)
-ti_m  <- clean_geom_5880(ti_amzl)
-uc_m  <- clean_geom_5880(uc_amzl)
-qui_m <- clean_geom_5880(qui_amzl)
-
-# UC relevante: Proteção Integral OU RESEX.
-uc_pi_resex <- uc_m[uc_m$grupo == "PROTEÇÃO INTEGRAL" | uc_m$sigla_snuc == "RESEX", ]
-if (nrow(uc_pi_resex) == 0) {
-  uc_pi_resex <- uc_m[toupper(uc_m$grupo) == "PROTEÇÃO INTEGRAL" | toupper(uc_m$sigla_snuc) == "RESEX", ]
+invalid_geom <- !terra::is.valid(pma_amzl)
+if(any(invalid_geom)) {
+  pma_amzl <- rbind(terra::buffer(pma_amzl[invalid_geom, ], 0), 
+  pma_amzl[!invalid_geom, ])
 }
 
+# UC relevante: Proteção Integral OU RESEX.
+uc_pi_resex <- uc_amzl[uc_amzl$grupo == "Proteção Integral" | uc_amzl$sigla_snuc == "RESEX", ]
+qui_amzl    <- qui_amzl |> select(nm_comunid) 
+
 # --- Buffers de entorno ----------------------------------
-qui_bf <- terra::makeValid(terra::buffer(qui_m, width = 10000))
-ti_bf  <- terra::makeValid(terra::buffer(ti_m,  width = 10000))
-uc_bf  <- terra::makeValid(terra::buffer(
-  uc_pi_resex,
-  width = ifelse(toupper(trimws(uc_pi_resex$pl_manejo)) == "SIM", 10000, 2000)))
+qui_bf      <- terra::buffer(qui_amzl, width = 10000)
+ti_bf       <- terra::buffer(ti_amzl, width = 10000)
+uc_bf       <- terra::buffer(uc_pi_resex, 
+                             width = ifelse(toupper(trimws(uc_pi_resex$pl_manejo)) == "SIM", 
+                                            10000, 2000)) 
 
-ti_diss  <- terra::makeValid(terra::aggregate(ti_m))
-uc_diss  <- terra::makeValid(terra::aggregate(uc_pi_resex))
-qui_diss <- terra::makeValid(terra::aggregate(qui_m))
-
-qui_bf_only <- terra::makeValid(terra::erase(qui_bf, qui_diss))
-ti_bf_only  <- terra::makeValid(terra::erase(ti_bf,  ti_diss))
-uc_bf_only  <- terra::makeValid(terra::erase(uc_bf,  uc_diss))
+qui_bf_only <- terra::erase(qui_bf, qui_amzl)
+ti_bf_only  <- terra::erase(ti_bf, ti_amzl)
+uc_bf_only  <- terra::erase(uc_bf, uc_pi_resex)
 
 # --- Função de sobreposição (>= 5% da área do processo) ----------------------
 calc_overlap <- function(pma_lyr, tp_lyr, flag_name) {
   inter <- terra::intersect(pma_lyr, tp_lyr)
-  if (nrow(inter) == 0) {
-    return(data.frame(PROCESSO = character(0)) |> dplyr::mutate(!!flag_name := integer(0)))
-  }
   inter$area_inter <- terra::expanse(inter, unit = "ha")
   inter <- inter |> tidyterra::select("PROCESSO", "AREA_HA", "area_inter") |> as.data.frame()
   inter$Propor <- as.numeric(inter$area_inter / inter$AREA_HA)
-  inter |>
+  
+  inter |> 
     dplyr::filter(Propor >= 0.05) |>
     dplyr::mutate(!!flag_name := 1L) |>
     dplyr::select(PROCESSO, !!flag_name) |>
+    dplyr::mutate(dplyr::across(dplyr::where(is.character), toupper)) |>
     dplyr::distinct(PROCESSO, .keep_all = TRUE)
 }
 
 # (a) Sobreposição DIRETA -----------------------------------------------------
-df_ti_pma  <- calc_overlap(pma_m, ti_m,        "TIov")
-df_uc_pma  <- calc_overlap(pma_m, uc_pi_resex, "UCov")
-df_qui_pma <- calc_overlap(pma_m, qui_m,       "QUIov")
+df_ti_pma  <- calc_overlap(pma_amzl, ti_amzl,          "TIov")
+df_uc_pma  <- calc_overlap(pma_amzl, uc_pi_resex,      "UCov")
+df_qui_pma <- calc_overlap(pma_amzl, qui_amzl,         "QUIov")
 
-pma_tp0 <- pma_m |>
-  tidyterra::left_join(df_ti_pma,  by = "PROCESSO") |>
-  tidyterra::left_join(df_uc_pma,  by = "PROCESSO") |>
-  tidyterra::left_join(df_qui_pma, by = "PROCESSO") |>
-  dplyr::mutate(TIov = tidyr::replace_na(TIov,0L),
-                UCov = tidyr::replace_na(UCov,0L),
-                QUIov = tidyr::replace_na(QUIov,0L))
+pma_tp0 <- pma_amzl |>
+  tidyterra::left_join(df_ti_pma,  by = 'PROCESSO') |>
+  tidyterra::left_join(df_uc_pma,  by = 'PROCESSO') |>
+  tidyterra::left_join(df_qui_pma, by = 'PROCESSO') |>
+  dplyr::mutate(
+    TIov  = tidyr::replace_na(TIov,  0L),
+    UCov  = tidyr::replace_na(UCov,  0L),
+    QUIov = tidyr::replace_na(QUIov, 0L)
+  )
 
 pma_tp_uc <- as.data.frame(terra::intersect(pma_tp0, uc_pi_resex)) |>
-  dplyr::select("PROCESSO","sigla_snuc","nome_uc") |>
+  dplyr::select("PROCESSO", "sigla_snuc", "nome_uc") |>
   dplyr::rename(UCtype = sigla_snuc, UCname = nome_uc) |>
   dplyr::group_by(PROCESSO) |>
-  dplyr::summarise(UCtype = paste(unique(UCtype), collapse="|"),
-                   UCname = paste(unique(UCname), collapse="|"), .groups="drop")
-pma_tp_ti <- as.data.frame(terra::intersect(pma_tp0, ti_m)) |>
-  dplyr::select("PROCESSO","terrai_nom") |> dplyr::rename(TIname = terrai_nom) |>
+  dplyr::summarise(
+    UCtype = paste(unique(UCtype), collapse = "|"), 
+    UCname = paste(unique(UCname), collapse = "|")
+  )
+
+pma_tp_ti <- as.data.frame(terra::intersect(pma_tp0, ti_amzl)) |>
+  dplyr::select("PROCESSO", "terrai_nom") |>
+  dplyr::rename(TIname = terrai_nom) |>
   dplyr::group_by(PROCESSO) |>
-  dplyr::summarise(TIname = toupper(paste(unique(TIname), collapse="|")), .groups="drop")
-pma_tp_qui <- as.data.frame(terra::intersect(pma_tp0, qui_m)) |>
-  dplyr::select("PROCESSO","nm_comunid") |> dplyr::rename(QUIname = nm_comunid) |>
+  dplyr::summarise(TIname = paste(unique(TIname), collapse = "|")) |>
+  dplyr::mutate(
+    TIname = stringi::stri_encode(TIname, from = "Windows-1252", to = "UTF-8"), 
+    dplyr::across(dplyr::where(is.character), toupper)
+  )
+
+pma_tp_qui <- as.data.frame(terra::intersect(pma_tp0, qui_amzl)) |>
+  dplyr::select("PROCESSO", "nm_comunid") |>
+  dplyr::rename(QUIname = nm_comunid) |>
   dplyr::group_by(PROCESSO) |>
-  dplyr::summarise(QUIname = paste(unique(QUIname), collapse="|"), .groups="drop")
+  dplyr::summarise(QUIname = paste(unique(QUIname), collapse = "|"))
 
 pma_tp1 <- pma_tp0 |>
-  tidyterra::left_join(pma_tp_uc,  by="PROCESSO") |>
-  tidyterra::left_join(pma_tp_ti,  by="PROCESSO") |>
-  tidyterra::left_join(pma_tp_qui, by="PROCESSO")
+  tidyterra::left_join(pma_tp_uc,  by = 'PROCESSO') |>
+  tidyterra::left_join(pma_tp_ti,  by = 'PROCESSO') |>
+  tidyterra::left_join(pma_tp_qui, by = 'PROCESSO')
 
 # (b) Sobreposição com o ENTORNO --------------------------------------
 df_ti_donut  <- calc_overlap(pma_tp1, ti_bf_only,  "TIov10km")
@@ -469,40 +473,53 @@ df_uc_donut  <- calc_overlap(pma_tp1, uc_bf_only,  "UCov2_10km")
 df_qui_donut <- calc_overlap(pma_tp1, qui_bf_only, "QUIov10km")
 
 pma_tp2 <- pma_tp1 |>
-  tidyterra::left_join(df_ti_donut,  by="PROCESSO") |>
-  tidyterra::left_join(df_uc_donut,  by="PROCESSO") |>
-  tidyterra::left_join(df_qui_donut, by="PROCESSO") |>
-  dplyr::mutate(TIov10km = tidyr::replace_na(TIov10km,0L),
-                UCov2_10km = tidyr::replace_na(UCov2_10km,0L),
-                QUIov10km = tidyr::replace_na(QUIov10km,0L))
+  tidyterra::left_join(df_ti_donut,  by = 'PROCESSO') |>
+  tidyterra::left_join(df_uc_donut,  by = 'PROCESSO') |>
+  tidyterra::left_join(df_qui_donut, by = 'PROCESSO') |>
+  dplyr::mutate(
+    TIov10km   = tidyr::replace_na(TIov10km,   0L),
+    UCov2_10km = tidyr::replace_na(UCov2_10km, 0L),
+    QUIov10km  = tidyr::replace_na(QUIov10km,  0L)
+  )
 
 pma_tp_uc_ov <- as.data.frame(terra::intersect(pma_tp2, uc_bf_only)) |>
-  dplyr::select("PROCESSO","sigla_snuc","nome_uc") |>
+  dplyr::select("PROCESSO", "sigla_snuc", "nome_uc") |>
   dplyr::rename(UCtype_ov = sigla_snuc, UCname_ov = nome_uc) |>
   dplyr::group_by(PROCESSO) |>
-  dplyr::summarise(UCtype_ov = paste(unique(UCtype_ov), collapse="|"),
-                   UCname_ov = paste(unique(UCname_ov), collapse="|"), .groups="drop")
+  dplyr::summarise(
+    UCtype_ov = paste(unique(UCtype_ov), collapse = "|"), 
+    UCname_ov = paste(unique(UCname_ov), collapse = "|")
+  )
+
 pma_tp_ti_ov <- as.data.frame(terra::intersect(pma_tp2, ti_bf_only)) |>
-  dplyr::select("PROCESSO","terrai_nom") |> dplyr::rename(TIname_ov = terrai_nom) |>
+  dplyr::select("PROCESSO", "terrai_nom") |>
+  dplyr::rename(TIname_ov = terrai_nom) |>
   dplyr::group_by(PROCESSO) |>
-  dplyr::summarise(TIname_ov = toupper(paste(unique(TIname_ov), collapse="|")), .groups="drop")
+  dplyr::summarise(TIname_ov = paste(unique(TIname_ov), collapse = "|")) |>
+  dplyr::mutate(
+    TIname_ov = stringi::stri_encode(TIname_ov, from = "Windows-1252", to = "UTF-8"), 
+    dplyr::across(dplyr::where(is.character), toupper)
+  )
+
 pma_tp_qui_ov <- as.data.frame(terra::intersect(pma_tp2, qui_bf_only)) |>
-  dplyr::select("PROCESSO","nm_comunid") |> dplyr::rename(QUIname_ov = nm_comunid) |>
+  dplyr::select("PROCESSO", "nm_comunid") |>
+  dplyr::rename(QUIname_ov = nm_comunid) |>
   dplyr::group_by(PROCESSO) |>
-  dplyr::summarise(QUIname_ov = paste(unique(QUIname_ov), collapse="|"), .groups="drop")
+  dplyr::summarise(QUIname_ov = paste(unique(QUIname_ov), collapse = "|"))
 
 pma_tp <- pma_tp2 |>
-  tidyterra::left_join(pma_tp_uc_ov,  by="PROCESSO") |>
-  tidyterra::left_join(pma_tp_ti_ov,  by="PROCESSO") |>
-  tidyterra::left_join(pma_tp_qui_ov, by="PROCESSO")
+  tidyterra::left_join(pma_tp_uc_ov,  by = 'PROCESSO') |>
+  tidyterra::left_join(pma_tp_ti_ov,  by = 'PROCESSO') |>
+  tidyterra::left_join(pma_tp_qui_ov, by = 'PROCESSO')
 
-# --- Flags de embargo / infração -----------------------
-EMBmtSEMA <- clean_geom_5880(terra::vect(file.path(PRE_PROC_DIR, "sema_mt_embargos.shp")))
-EMBmtSIGA <- clean_geom_5880(terra::vect(file.path(PRE_PROC_DIR, "sema_mt_embargos_siga.shp")))
-EMBib     <- clean_geom_5880(terra::vect(file.path(PRE_PROC_DIR, "ibama_embargos.shp")))
-EMBic     <- clean_geom_5880(terra::vect(file.path(PRE_PROC_DIR, "icmbio_embargos.shp")))
-INFmtSIGA <- clean_geom_5880(terra::vect(file.path(PRE_PROC_DIR, "sema_mt_infracoes_siga.shp")))
-INFic     <- clean_geom_5880(terra::vect(file.path(PRE_PROC_DIR, "icmbio_infracoes.shp")))
+names(as.data.frame(pma_tp))
+
+EMBmtSEMA <- terra::vect(file.path(PRE_PROC_DIR, "sema_mt_embargos.shp"))
+EMBmtSIGA <- terra::vect(file.path(PRE_PROC_DIR, "sema_mt_embargos_siga.shp"))
+EMBib     <- terra::vect(file.path(PRE_PROC_DIR, "ibama_embargos.shp"))
+EMBic     <- terra::vect(file.path(PRE_PROC_DIR, "icmbio_embargos.shp"))
+INFmtSIGA <- terra::vect(file.path(PRE_PROC_DIR, "sema_mt_infracoes_siga.shp"))
+INFic     <- terra::vect(file.path(PRE_PROC_DIR, "icmbio_infracoes.shp"))
 
 pma_tp$inf_MT  <- as.integer(terra::is.related(pma_tp, INFmtSIGA, "intersects"))
 pma_tp$inf_IC  <- as.integer(terra::is.related(pma_tp, INFic,     "intersects"))
@@ -511,9 +528,26 @@ pma_tp$emb_MTb <- as.integer(terra::is.related(pma_tp, EMBmtSIGA, "intersects"))
 pma_tp$emb_IB  <- as.integer(terra::is.related(pma_tp, EMBib,     "intersects"))
 pma_tp$emb_IC  <- as.integer(terra::is.related(pma_tp, EMBic,     "intersects"))
 
-pma_tp <- terra::project(pma_tp, "EPSG:4326")
+names(as.data.frame(pma_tp))
 
 save_ckpt(pma_tp, "05_pma_tp")
+
+# proc_alvo <- "886197/2008"
+
+# probe <- function(x, label) {
+#   sub <- x[x$PROCESSO == proc_alvo, ]
+#   cat(sprintf("%-16s nrow_total=%6d  nrow_proc=%d", label, nrow(x), nrow(sub)))
+#   if (nrow(sub) > 0) {
+#     g <- terra::centroids(sub) |> terra::geom()
+#     cat(sprintf("  AREA_HA=%.4f  centroid=(%.5f, %.5f)\n", sub$AREA_HA[1], g[1,"x"], g[1,"y"]))
+#   } else cat("  (não encontrado)\n")
+# }
+
+# probe(pma_amzl, "pma_amzl")
+# probe(pma_tp0, "pma_tp0")
+# probe(pma_tp1, "pma_tp1")
+# probe(pma_tp2, "pma_tp2")
+# probe(pma_tp, "pma_tp_4326")
 
 # =============================================================================
 # BLOCO 6 — CFEM: limpeza, razão social, alíquotas e correção de peso
@@ -970,17 +1004,29 @@ save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
 cfem_final <- load_ckpt("06_cfem_final")
 pma_tp     <- load_ckpt("05_pma_tp")
 
+get_mode <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(NA_character_)
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
 arr_corr_unique <- cfem_final |>
   dplyr::arrange(PROCESSO, ANO, MES) |>
   dplyr::group_by(PROCESSO) |>
   dplyr::summarise(
+    cfem_arr  = 1L,
     arr_kg_T  = sum(PESO_KG_final, na.rm = TRUE),
     arr_kg_L  = dplyr::if_else(all(is.na(PESO_KG_final)), NA_real_, dplyr::last(na.omit(PESO_KG_final))),
     arr_g_T   = sum(PESO_G_final,  na.rm = TRUE),
     arr_g_L   = dplyr::if_else(all(is.na(PESO_G_final)),  NA_real_, dplyr::last(na.omit(PESO_G_final))),
     arr_val_T = sum(VALORarr, na.rm = TRUE),
+    arr_val_L = dplyr::if_else(all(is.na(VALORarr)), NA_real_, dplyr::last(na.omit(VALORarr))),
+    arr_dt_F  = as.character(min(data, na.rm = TRUE)),
+    arr_dt_L  = as.character(max(data, na.rm = TRUE)),
     arr_ndcl  = dplyr::n(),
     arr_nbuy  = dplyr::n_distinct(CPF_CNPJarr, na.rm = TRUE),
+    arr_topb  = get_mode(NOME_arr),
     .groups = "drop"
   ) |>
   dplyr::mutate(dplyr::across(dplyr::where(is.numeric), ~ round(.x, 2)))
@@ -995,13 +1041,30 @@ pma_tp <- pma_tp |>
       ULT_EVENTO, paste0(ULT_EV_ID, " - |EM ", ULT_EV_DAT)))
   )
 
-pma_full <- tidyterra::left_join(pma_tp, arr_corr_unique, by = "PROCESSO") |>
+cfem_aut_amzl <- load_ckpt("06_cfem_aut_amzl")
+
+aut_unique <- cfem_aut_amzl |>
+  dplyr::group_by(PROCESSO) |>
+  dplyr::summarise(
+    cfem_aut  = 1L,
+    aut_val_T = round(sum(VALORaut, na.rm = TRUE), 2),
+    aut_n     = dplyr::n(),
+    .groups = "drop"
+  )
+
+pma_full <- pma_tp |>
+  tidyterra::left_join(arr_corr_unique, by = "PROCESSO") |>
+  tidyterra::left_join(aut_unique,      by = "PROCESSO") |>
   dplyr::mutate(
-    arr_kg_T = tidyr::replace_na(arr_kg_T, 0),
-    arr_g_T  = tidyr::replace_na(arr_g_T,  0),
+    cfem_arr  = tidyr::replace_na(cfem_arr, 0L),
+    cfem_aut  = tidyr::replace_na(cfem_aut, 0L),
+    arr_kg_T  = tidyr::replace_na(arr_kg_T, 0),
+    arr_g_T   = tidyr::replace_na(arr_g_T,  0),
     arr_val_T = tidyr::replace_na(arr_val_T, 0),
     arr_ndcl  = tidyr::replace_na(arr_ndcl, 0L),
-    arr_nbuy  = tidyr::replace_na(arr_nbuy, 0L)
+    arr_nbuy  = tidyr::replace_na(arr_nbuy, 0L),
+    aut_val_T = tidyr::replace_na(aut_val_T, 0),
+    aut_n     = tidyr::replace_na(aut_n, 0L)
   )
 
 save_ckpt(pma_full, "07_pma_full")
@@ -1042,20 +1105,23 @@ readr::write_csv(cfem_bioma_mensal, file.path(RESULT_GEE, "cfem_AMAZONIA_ALLmine
 
 # DB
 cols_drop_db <- c(
-  "arr_kg_T","arr_g_T","arr_val_T","arr_ndcl","arr_nbuy", "arr_g_L", "arr_kg_L",
+  "arr_kg_T","arr_kg_L","arr_g_T","arr_g_L","arr_val_T","arr_val_L",
+  "arr_dt_F","arr_dt_L","arr_ndcl","arr_nbuy","arr_topb",
+  "aut_val_T","aut_n",
+  "ULT_EV_ID","ULT_EV_DAT","ULT_EV_DES","ULT_EVENTO",
   "UCtype","UCname","TIname","QUIname",
   "UCtype_ov","UCname_ov","TIname_ov","QUIname_ov",
-  "inf_MT","inf_IC","emb_MTa","emb_MTb","emb_IB","emb_IC",
-  "ULT_EV_ID","ULT_EV_DAT","ULT_EV_DES", "ULT_EVENTO"
+  "inf_MT","inf_IC","emb_MTa","emb_MTb","emb_IB","emb_IC"
 )
 pma_db <- pma_full |> dplyr::select(-dplyr::any_of(cols_drop_db))
 
-# Renomeia colunas geográficas remanescentes para nomes curtos.
 rename_db <- c(name_muni = "munic_pma", abbrev_state = "uf_pma",
                name_state = "estado", name_region = "regiao", code_muni = "cod_munic")
 for (old in names(rename_db)) {
   if (old %in% names(pma_db)) names(pma_db)[names(pma_db) == old] <- rename_db[[old]]
 }
+# pma_db <- terra::vect(file.path(RESULT_DB, "pma_amzl_ALLminerals_final.geojson"))
+# sort(names(pma_db))
 
 terra::writeVector(pma_db,      file.path(RESULT_DB, "pma_amzl_ALLminerals_final.geojson"), filetype = "GeoJSON", overwrite = TRUE)
 terra::writeVector(ti_amzl,     file.path(RESULT_DB, "ti_amzl.geojson"),  filetype = "GeoJSON", overwrite = TRUE)
@@ -1065,3 +1131,5 @@ readr::write_csv(cfem_final,    file.path(RESULT_DB, "cfem_amzl_ALLminerals_GOLD
 readr::write_csv(cfem_aut_amzl, file.path(RESULT_DB, "cfem_aut_all_min_amzl.csv"))
 
 message("\n=== 03_final_proc.R v2 — CONCLUÍDO ===")
+
+#probe(pma_db, "final")

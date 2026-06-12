@@ -1,0 +1,4 @@
+cd C:\GP\anm-geo\api
+C:\ProgramData\anaconda3\Scripts\activate.bat
+conda activate anm-api
+uvicorn main:app --reload

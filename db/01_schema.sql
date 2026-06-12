@@ -18,7 +18,7 @@ CREATE TABLE processos (
     titular       TEXT, 
 	cpf_cnpjcm    TEXT,
     subs          TEXT,
-	subspmagrp    TEXT,                      -- grupo mineral padronizado	
+	subspmagrp    TEXT,
 	fase          TEXT,
 	tipo_reqcm    TEXT,
     area_orig     NUMERIC,                   -- área oficial ANM (ha)
@@ -26,13 +26,15 @@ CREATE TABLE processos (
     munic         TEXT,
     uf            TEXT,
     n_munic       INTEGER,
-    munic_fonte   TEXT,                      -- microdado / centroide / centroide_sem_micro
+    munic_fonte   TEXT,
 	tiov          BOOLEAN,
     ucov          BOOLEAN,
     quiov         BOOLEAN,
     tiov10km      BOOLEAN,
     ucov2_10km    BOOLEAN,
     quiov10km     BOOLEAN,
+	cfem_arr      BOOLEAN,
+    cfem_aut      BOOLEAN,
     geom          GEOMETRY(MultiPolygon, 4326)
 );
 

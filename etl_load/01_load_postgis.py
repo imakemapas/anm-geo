@@ -47,7 +47,7 @@ def carregar_geojson(arquivo, tabela):
  
     cols = [c for c in gdf.columns if c != "geom"]
     
-    cols_booleanas = ["tiov", "ucov", "quiov", "tiov10km", "ucov2_10km", "quiov10km"]
+    cols_booleanas = ["tiov", "ucov", "quiov", "tiov10km", "ucov2_10km", "quiov10km", "cfem_arr", "cfem_aut"]
     for col in cols_booleanas:
         if col in gdf.columns:
             gdf[col] = gdf[col].fillna(0).astype(bool)
