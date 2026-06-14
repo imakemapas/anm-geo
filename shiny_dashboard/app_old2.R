@@ -53,17 +53,6 @@ fases_anual  <- fases_all
 fases_mensal <- fases_all
 map_subs     <- cfem |> dplyr::distinct(SUBSarrSIM, SUBSarr)
 
-# ---- Lookups enxutos para filtros encadeados (pré-calculados no 05) ----
-# Lidos prontos do disco, em vez de calcular distinct() sobre o cfem inteiro na
-# inicialização — mantém a abertura do app rápida.
-lk_mun      <- .read_rds("lk_mun_tab1.rds")
-lk_tit_proc <- .read_rds("lk_tit_proc_tab1.rds")
-lk_decl     <- .read_rds("lk_decl_tab1.rds")
-
-lk_mun_tab2      <- .read_rds("lk_mun_tab2.rds")
-lk_tit_proc_tab2 <- .read_rds("lk_tit_proc_tab2.rds")
-lk_decl_tab2     <- .read_rds("lk_decl_tab2.rds")
-
 # ---- Primeira aba ordem colunas + rótulos amigáveis ----
 cols_visible <- c(
   "SUBSarrSIM",
@@ -446,6 +435,7 @@ ui <- page_navbar(
                   pickerInput(inputId  = "procs_tab1",
                               label    = "Processo(s):",
                               choices  = procs_all,
+                              selected = procs_all,
                               multiple = TRUE,
                               options  = picker_opts),
 
@@ -959,41 +949,39 @@ server <- function(input, output, session) {
   sync_pair(session, "subs_tab1", "subs_det_tab1", map_subs, "SUBSarrSIM", "SUBSarr")
 
   observeEvent(list(input$subs_tab1, input$subs_det_tab1, input$ufs_tab1, input$fases_tab1, input$periodo_tab1), {
-    df_temp <- lk_mun |>
+    df_temp <- cfem |>
       dplyr::filter(
         ANO >= input$periodo_tab1[1], ANO <= input$periodo_tab1[2],
         FASE %in% input$fases_tab1, abbrev_state %in% input$ufs_tab1
       )
     if (length(input$subs_det_tab1)) { df_temp <- df_temp |> dplyr::filter(SUBSarr %in% input$subs_det_tab1) } else {
       df_temp <- df_temp |> dplyr::filter(SUBSarrSIM %in% input$subs_tab1) }
-    muns_ok <- sort(unique(df_temp$name_muni))
-    updatePickerInput(session, "muns_tab1", choices = muns_ok,
-                      selected = intersect(isolate(input$muns_tab1), muns_ok))
-    rm(df_temp)
-  }, ignoreInit = TRUE)
+    updatePickerInput(session, "muns_tab1", choices = sort(unique(df_temp$name_muni)),
+                      selected = intersect(isolate(input$muns_tab1), sort(unique(df_temp$name_muni))))
+    rm(df_temp); gc()
+  }, ignoreInit = FALSE)
 
   observeEvent(list(input$muns_tab1, input$ufs_tab1), {
-    df_temp <- lk_tit_proc |> dplyr::filter(abbrev_state %in% input$ufs_tab1, name_muni %in% input$muns_tab1)
-    tits_ok  <- sort(unique(df_temp$TITULAR))
-    procs_ok <- sort(unique(df_temp$PROCESSO))
-    updatePickerInput(session, "tits_tab1", choices = tits_ok,
-                      selected = intersect(isolate(input$tits_tab1), tits_ok))
-    updatePickerInput(session, "procs_tab1", choices = procs_ok,
-                      selected = intersect(isolate(input$procs_tab1), procs_ok))
+    df_temp <- cfem |> dplyr::filter(abbrev_state %in% input$ufs_tab1, name_muni %in% input$muns_tab1)
+    updatePickerInput(session, "tits_tab1", choices = sort(unique(df_temp$TITULAR)),
+                      selected = intersect(isolate(input$tits_tab1), sort(unique(df_temp$TITULAR))))
+    updatePickerInput(session, "procs_tab1", choices = sort(unique(df_temp$PROCESSO)),
+                      selected = intersect(isolate(input$procs_tab1), sort(unique(df_temp$PROCESSO))))
     rm(df_temp)
-  }, ignoreInit = TRUE)
+    gc()
+  }, ignoreInit = FALSE)
 
   observeEvent(list(input$procs_tab1, input$tits_tab1), {
-    df_temp <- lk_decl |>
+    df_temp <- cfem |>
       dplyr::filter(
         abbrev_state %in% input$ufs_tab1, name_muni %in% input$muns_tab1,
         TITULAR %in% input$tits_tab1, PROCESSO %in% input$procs_tab1
       )
-    decl_ok <- sort(unique(df_temp$NOME_arr))
-    updatePickerInput(session, "decl_tab1", choices = decl_ok,
-                      selected = intersect(isolate(input$decl_tab1), decl_ok))
+    updatePickerInput(session, "decl_tab1", choices = sort(unique(df_temp$NOME_arr)),
+                      selected = intersect(isolate(input$decl_tab1), sort(unique(df_temp$NOME_arr))))
     rm(df_temp)
-  }, ignoreInit = TRUE)
+    gc()
+  }, ignoreInit = FALSE)
 
   dados_filtrados <- reactive({
     showNotification("Filtrando dados...", duration = 1, type = "default")
@@ -1024,7 +1012,7 @@ server <- function(input, output, session) {
     updatePickerInput(session, "subs_det_tab1", choices = subs_all_original, selected = subs_all_original)
     updatePickerInput(session, "muns_tab1", choices     = muns_all, selected  = muns_all)
     updatePickerInput(session, "tits_tab1", choices     = tits_all, selected  = tits_all)
-    updatePickerInput(session, "procs_tab1", choices    = procs_all, selected = character(0))
+    updatePickerInput(session, "procs_tab1", choices    = procs_all, selected = procs_all)
     updatePickerInput(session, "decl_tab1", choices     = decl_all, selected  = decl_all)
   })
 
@@ -1280,28 +1268,28 @@ server <- function(input, output, session) {
   sync_pair(session, "subs_tab2", "subs_det_tab2", map_subs, "SUBSarrSIM", "SUBSarr")
 
   observeEvent(list(input$subs_tab2, input$subs_det_tab2, input$ufs_tab2, input$fases_tab2, input$periodo_tab2), {
-    df_temp <- lk_mun_tab2 |>
+    df_temp <- cfem_anual |>
       dplyr::filter(ANO >= input$periodo_tab2[1], ANO <= input$periodo_tab2[2], FASE %in% input$fases_tab2, abbrev_state %in% input$ufs_tab2)
     if (length(input$subs_det_tab2)) { df_temp <- df_temp |> dplyr::filter(SUBSarr %in% input$subs_det_tab2) } else { df_temp <- df_temp |> dplyr::filter(SUBSarrSIM %in% input$subs_tab2) }
-    muns_ok <- sort(unique(df_temp$name_muni))
-    updatePickerInput(session, "muns_tab2", choices = muns_ok, selected = intersect(isolate(input$muns_tab2), muns_ok))
+    updatePickerInput(session, "muns_tab2", choices = sort(unique(df_temp$name_muni)), selected = intersect(isolate(input$muns_tab2), sort(unique(df_temp$name_muni))))
     rm(df_temp)
-  }, ignoreInit = TRUE)
+    gc()
+  }, ignoreInit = FALSE)
 
   observeEvent(list(input$muns_tab2, input$tits_tab2, input$ufs_tab2), {
-    df_temp <- lk_tit_proc_tab2 |> dplyr::filter(abbrev_state %in% input$ufs_tab2, name_muni %in% input$muns_tab2)
-    tits_ok <- sort(unique(df_temp$TITULAR)); procs_ok <- sort(unique(df_temp$PROCESSO))
-    updatePickerInput(session, "tits_tab2", choices = tits_ok, selected = intersect(isolate(input$tits_tab2), tits_ok))
-    updatePickerInput(session, "procs_tab2", choices = procs_ok, selected = intersect(isolate(input$procs_tab2), procs_ok))
+    df_temp <- cfem_anual |> dplyr::filter(abbrev_state %in% input$ufs_tab2, name_muni %in% input$muns_tab2)
+    updatePickerInput(session, "tits_tab2", choices = sort(unique(df_temp$TITULAR)), selected = intersect(isolate(input$tits_tab2), sort(unique(df_temp$TITULAR))))
+    updatePickerInput(session, "procs_tab2", choices = sort(unique(df_temp$PROCESSO)), selected = intersect(isolate(input$procs_tab2), sort(unique(df_temp$PROCESSO))))
     rm(df_temp)
-  }, ignoreInit = TRUE)
+    gc()
+  }, ignoreInit = FALSE)
 
   observeEvent(list(input$procs_tab2, input$tits_tab2), {
-    df_temp <- lk_decl_tab2 |> dplyr::filter(abbrev_state %in% input$ufs_tab2, name_muni %in% input$muns_tab2, TITULAR %in% input$tits_tab2, PROCESSO %in% input$procs_tab2)
-    decl_ok <- sort(unique(df_temp$NOME_arr))
-    updatePickerInput(session, "decl_tab2", choices = decl_ok, selected = intersect(isolate(input$decl_tab2), decl_ok))
+    df_temp <- cfem_anual |> dplyr::filter(abbrev_state %in% input$ufs_tab2, name_muni %in% input$muns_tab2, TITULAR %in% input$tits_tab2, PROCESSO %in% input$procs_tab2)
+    updatePickerInput(session, "decl_tab2", choices = sort(unique(df_temp$NOME_arr)), selected = intersect(isolate(input$decl_tab2), sort(unique(df_temp$NOME_arr))))
     rm(df_temp)
-  }, ignoreInit = TRUE)
+    gc()
+  }, ignoreInit = FALSE)
 
   dados_selecionados_sankey <- reactive({
     showNotification("Atualizando Sankey...", duration = 1, type = "default")
@@ -1382,10 +1370,10 @@ server <- function(input, output, session) {
     updateSliderInput(session, "periodo_tab2", value = c(min(anos_all), max(anos_all)))
     updatePickerInput(session, "subs_det_tab2", choices = subs_all_original, selected = subs_all_original)
     updatePickerInput(session, "ufs_tab2", choices = ufs_all, selected = ufs_all)
-    updatePickerInput(session, "muns_tab2", choices = muns_all, selected = character(0))
-    updatePickerInput(session, "tits_tab2", choices = tits_all, selected = character(0))
-    updatePickerInput(session, "procs_tab2", choices = procs_all, selected = character(0))
-    updatePickerInput(session, "decl_tab2", choices = decl_all, selected = character(0))
+    updatePickerInput(session, "muns_tab2", choices = muns_all, selected = muns_all)
+    updatePickerInput(session, "tits_tab2", choices = tits_all, selected = tits_all)
+    updatePickerInput(session, "procs_tab2", choices = procs_all, selected = procs_all)
+    updatePickerInput(session, "decl_tab2", choices = decl_all, selected = decl_all)
   })
 
   # ---------- PMA para a ABA 2
@@ -2150,3 +2138,10 @@ server <- function(input, output, session) {
 }
 
 shinyApp(ui, server)
+
+
+
+
+
+
+

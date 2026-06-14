@@ -58,22 +58,12 @@ saveRDS(cfem, cfem_rds_path)
 # ---- 1b) Lookups enxutos para filtros encadeados do app (tab1 / fonte cfem) ----
 message("Creating filter lookups (tab1)...")
 
-lk_mun_tab1 <- cfem |>
-  dplyr::distinct(SUBSarrSIM, SUBSarr, FASE, abbrev_state, ANO, name_muni)
-
-lk_tit_proc_tab1 <- cfem |>
-  dplyr::distinct(abbrev_state, name_muni, TITULAR, PROCESSO)
-
-lk_decl_tab1 <- cfem |>
-  dplyr::distinct(abbrev_state, name_muni, TITULAR, PROCESSO, NOME_arr)
-
+lk_mun_tab1 <- cfem |> dplyr::distinct(SUBSarrSIM, SUBSarr, FASE, abbrev_state, ANO, name_muni)
+lk_tit_proc_tab1 <- cfem |> dplyr::distinct(abbrev_state, name_muni, TITULAR, PROCESSO)
+lk_decl_tab1 <- cfem |> dplyr::distinct(abbrev_state, name_muni, TITULAR, PROCESSO, NOME_arr)
 saveRDS(lk_mun_tab1,      file.path(OUTPUT_DIR, "lk_mun_tab1.rds"))
 saveRDS(lk_tit_proc_tab1, file.path(OUTPUT_DIR, "lk_tit_proc_tab1.rds"))
 saveRDS(lk_decl_tab1,     file.path(OUTPUT_DIR, "lk_decl_tab1.rds"))
-
-message("  lk_mun_tab1: ",      nrow(lk_mun_tab1),      " linhas")
-message("  lk_tit_proc_tab1: ", nrow(lk_tit_proc_tab1), " linhas")
-message("  lk_decl_tab1: ",     nrow(lk_decl_tab1),     " linhas")
 
 # ---- 2) CFEM anual aggregation ----
 message("Creating Annual Aggregation...")
@@ -105,6 +95,13 @@ pma_ocd_attr <- sf::st_read(pma_shp_path, quiet = TRUE) |>
 cfem_anual <- dplyr::inner_join(cfem_anual, pma_ocd_attr, by = "PROCESSO")
 saveRDS(cfem_anual, cfem_anual_rdsPath)
 
+# tab2 (fonte cfem_anual)
+lk_mun_tab2      <- cfem_anual |> dplyr::distinct(SUBSarrSIM, SUBSarr, FASE, abbrev_state, ANO, name_muni)
+lk_tit_proc_tab2 <- cfem_anual |> dplyr::distinct(abbrev_state, name_muni, TITULAR, PROCESSO)
+lk_decl_tab2     <- cfem_anual |> dplyr::distinct(abbrev_state, name_muni, TITULAR, PROCESSO, NOME_arr)
+saveRDS(lk_mun_tab2,      file.path(OUTPUT_DIR, "lk_mun_tab2.rds"))
+saveRDS(lk_tit_proc_tab2, file.path(OUTPUT_DIR, "lk_tit_proc_tab2.rds"))
+saveRDS(lk_decl_tab2,     file.path(OUTPUT_DIR, "lk_decl_tab2.rds"))
 
 # ---- 3) CFEM mensal ----
 message("Formatting Monthly data...")
@@ -113,6 +110,13 @@ cfem_mensal <- cfem |>
 
 saveRDS(cfem_mensal, cfem_mensal_rdsPath)
 
+# tab3 (fonte cfem_mensal)
+lk_mun_tab3      <- cfem_mensal |> dplyr::distinct(SUBSarrSIM, SUBSarr, FASE, abbrev_state, ANO, name_muni)
+lk_tit_proc_tab3 <- cfem_mensal |> dplyr::distinct(abbrev_state, name_muni, TITULAR, PROCESSO)
+lk_decl_tab3     <- cfem_mensal |> dplyr::distinct(abbrev_state, name_muni, TITULAR, PROCESSO, NOME_arr)
+saveRDS(lk_mun_tab3,      file.path(OUTPUT_DIR, "lk_mun_tab3.rds"))
+saveRDS(lk_tit_proc_tab3, file.path(OUTPUT_DIR, "lk_tit_proc_tab3.rds"))
+saveRDS(lk_decl_tab3,     file.path(OUTPUT_DIR, "lk_decl_tab3.rds"))
 
 # ---- 4) Geometry processing ----
 message("Processing Geospatial layers...")
