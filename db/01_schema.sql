@@ -66,7 +66,7 @@ CREATE TABLE unidades_conservacao (
 DROP TABLE IF EXISTS quilombolas CASCADE;
 CREATE TABLE quilombolas (
     id          SERIAL PRIMARY KEY,
-    cd_quilomb  NUMERIC,
+    cd_quilomb  INTEGER, --NUMERIC,
     cd_sr       TEXT,
     nr_process  TEXT,
     nm_comunid  TEXT,
@@ -106,7 +106,7 @@ CREATE TABLE cfem_eventos (
     cpf_cnpjarr   TEXT,
     subsarr       TEXT,
     abbrev_state  TEXT,
-    code_muni     NUMERIC,
+    code_muni     INTEGER, --NUMERIC,
     name_muni     TEXT,
     qtd_minerio   NUMERIC,
     um            TEXT,
