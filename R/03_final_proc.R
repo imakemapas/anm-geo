@@ -81,6 +81,32 @@ load_ckpt <- function(nome) {
 # Remove o ponto do dsprocesso (microdados) p/ casar com 'processo' (SIGMINE).
 limpar_dsprocesso <- function(x) stringr::str_replace_all(as.character(x), "\\.", "")
 
+#   CNPJ  -> 11.111.111/1111-11
+#   CPF mascarado -> ***.111.111-**
+#   vazio ("-", "", NA) -> NA
+padroniza_doc <- function(x) {
+  x  <- trimws(as.character(x))
+  d  <- gsub("\\D", "", x)            # só os dígitos
+  nd <- nchar(d)
+  dplyr::case_when(
+    # vazios
+    is.na(x) | x %in% c("", "-")                ~ NA_character_,
+    grepl("\\*", x) & nd == 6 ~ sprintf("***.%s.%s-**", substr(d,1,3), substr(d,4,6)),
+    nd == 14 ~ sprintf("%s.%s.%s/%s-%s",
+                       substr(d,1,2),  substr(d,3,5),  substr(d,6,8),
+                       substr(d,9,12), substr(d,13,14)),
+    nd > 6 & nd < 14 ~ {
+      d14 <- stringr::str_pad(d, 14, "left", "0")
+      sprintf("%s.%s.%s/%s-%s",
+              substr(d14,1,2),  substr(d14,3,5),  substr(d14,6,8),
+              substr(d14,9,12), substr(d14,13,14))
+    },
+    nd == 11 ~ sprintf("%s.%s.%s-%s",
+                       substr(d,1,3), substr(d,4,6), substr(d,7,9), substr(d,10,11)),
+    TRUE ~ NA_character_
+  )
+}
+
 # Lista de grupos minerais: mapeia substância declarada e cria grupo padronizado.
 target_minerals_list <- list(
   ouro         = c("OURO","MINÉRIO DE OURO","OURO NATIVO","OURO PIGMENTO","ALUVIÃO AURÍFERO"),
@@ -152,7 +178,17 @@ names(cm) <- n_new
 cm_clean <- cm |>
   dplyr::select(PROCESSO, TIPO_REQcm, FASEcm, CPF_CNPJcm, TITULARcm, SUBScm, DT_CESSAO) |>
   dplyr::filter(!is.na(PROCESSO)) |>
-  dplyr::mutate(dplyr::across(dplyr::where(is.character), toupper))
+  dplyr::mutate(dplyr::across(dplyr::where(is.character), toupper)) |>
+  dplyr::mutate(CPF_CNPJcm = padroniza_doc(CPF_CNPJcm))
+
+cm_clean |>
+  dplyr::mutate(
+    so_dig = gsub("\\D", "", CPF_CNPJcm),
+    ndig   = nchar(so_dig),
+    tem_pontuacao = grepl("\\D", CPF_CNPJcm)
+  ) |>
+  dplyr::count(ndig, tem_pontuacao) |>
+  as.data.frame()
 
 contagem_conflitos <- cm_clean |>
   dplyr::group_by(PROCESSO) |>
@@ -327,8 +363,8 @@ proc_mun_resumo <- proc_mun |>
 
 muni_ibge <- terra::vect(list.files(MUNI_DIR, pattern = "\\.shp$", full.names = TRUE)[1]) |>
   terra::project(terra::crs(pma_amzl))
-centroides <- terra::centroids(pma_amzl, inside = TRUE)
 
+centroides <- terra::centroids(pma_amzl, inside = TRUE)
 nm_ibge   <- names(muni_ibge)
 col_nmmun <- "NM_MUN"
 col_ufmun <- "SIGLA_UF"
@@ -348,26 +384,51 @@ munic_final <- as.data.frame(pma_amzl) |>
   dplyr::left_join(cent_mun, by = "PROCESSO") |>
   dplyr::mutate(
     n_munic = tidyr::replace_na(n_munic, 0L),
+    micro_ok = n_munic == 1 & !is.na(munic_unico),
     munic = dplyr::case_when(
-      n_munic == 1 ~ munic_unico,
-      n_munic >  1 ~ munic_centroide,
-      n_munic == 0 & !is.na(munic_centroide) ~ munic_centroide,
-      TRUE ~ NA_character_),
+      micro_ok                       ~ munic_unico,
+      !is.na(munic_centroide)        ~ munic_centroide,
+      TRUE                           ~ NA_character_),
     uf = dplyr::case_when(
-      n_munic == 1 ~ uf_unico,
-      n_munic >  1 ~ uf_centroide,
-      n_munic == 0 & !is.na(uf_centroide) ~ uf_centroide,
-      TRUE ~ NA_character_),
+      micro_ok                       ~ uf_unico,
+      !is.na(uf_centroide)           ~ uf_centroide,
+      TRUE                           ~ NA_character_),
     munic_fonte = dplyr::case_when(
-      n_munic == 1 ~ "microdado",
-      n_munic >  1 ~ "centroide",
+      micro_ok                       ~ "microdado",
+      n_munic > 1 & !is.na(munic_centroide)  ~ "centroide",
+      n_munic == 1 & !is.na(munic_centroide) ~ "centroide_micro_sem_nome",
       n_munic == 0 & !is.na(munic_centroide) ~ "centroide_sem_micro",
-      TRUE ~ NA_character_)
+      TRUE                           ~ NA_character_)
   ) |>
   dplyr::select(PROCESSO, munic, uf, n_munic, munic_fonte)
 
-pma_amzl <- tidyterra::left_join(pma_amzl, munic_final, by = "PROCESSO")
+ids_na <- munic_final |> dplyr::filter(is.na(munic)) |> dplyr::pull(PROCESSO)
 
+if (length(ids_na) > 0) {
+
+  cent_na  <- centroides[centroides$PROCESSO %in% ids_na, ]
+  nr       <- terra::nearest(cent_na, muni_ibge) 
+  idx_near <- terra::values(nr)$to_id             
+  near_df <- tibble::tibble(
+    PROCESSO       = cent_na$PROCESSO,
+    munic_near     = toupper(terra::values(muni_ibge)[[col_nmmun]][idx_near]),
+    uf_near        = toupper(terra::values(muni_ibge)[[col_ufmun]][idx_near])
+  )
+
+  munic_final <- munic_final |>
+    dplyr::left_join(near_df, by = "PROCESSO") |>
+    dplyr::mutate(
+      preencheu_near = is.na(munic) & !is.na(munic_near),
+      munic       = dplyr::if_else(preencheu_near, munic_near, munic),
+      uf          = dplyr::if_else(preencheu_near, uf_near,    uf),
+      munic_fonte = dplyr::if_else(preencheu_near, "centroide_nearest", munic_fonte)
+    ) |>
+    dplyr::select(-munic_near, -uf_near, -preencheu_near)
+}
+
+print(sum(is.na(munic_final$munic)))
+
+pma_amzl <- tidyterra::left_join(pma_amzl, munic_final, by = "PROCESSO")
 save_ckpt(pma_amzl, "04_pma_amzl")
 
 # =============================================================================
@@ -375,6 +436,7 @@ save_ckpt(pma_amzl, "04_pma_amzl")
 # =============================================================================
 
 pma_amzl <- load_ckpt("04_pma_amzl")
+
 ti_amzl  <- load_ckpt("03_ti_amzl")
 uc_amzl  <- load_ckpt("03_uc_amzl")
 qui_amzl <- load_ckpt("03_qui_amzl")
@@ -525,25 +587,8 @@ names(as.data.frame(pma_tp))
 
 save_ckpt(pma_tp, "05_pma_tp")
 
-# proc_alvo <- "886197/2008"
-
-# probe <- function(x, label) {
-#   sub <- x[x$PROCESSO == proc_alvo, ]
-#   cat(sprintf("%-16s nrow_total=%6d  nrow_proc=%d", label, nrow(x), nrow(sub)))
-#   if (nrow(sub) > 0) {
-#     g <- terra::centroids(sub) |> terra::geom()
-#     cat(sprintf("  AREA_HA=%.4f  centroid=(%.5f, %.5f)\n", sub$AREA_HA[1], g[1,"x"], g[1,"y"]))
-#   } else cat("  (não encontrado)\n")
-# }
-
-# probe(pma_amzl, "pma_amzl")
-# probe(pma_tp0, "pma_tp0")
-# probe(pma_tp1, "pma_tp1")
-# probe(pma_tp2, "pma_tp2")
-# probe(pma_tp, "pma_tp_4326")
-
 # =============================================================================
-# BLOCO 6 — CFEM: limpeza, razão social, alíquotas e correção de peso
+# BLOCO 6 — CFEM
 # -----------------------------------------------------------------------------
 
 processos_amzl <- load_ckpt("03_processos_amzl")
@@ -564,7 +609,8 @@ cfem_aut <- readr::read_csv(file.path(PRE_PROC_DIR, "CFEM_Autuacao.csv"),
   ) |>
   dplyr::filter(!is.na(PROCESSO), !is.na(ANO), !is.na(MES),
                 !is.na(SUBSaut), !is.na(CPF_CNPJaut), PROCESSO != "NA/NA") |>
-  dplyr::mutate(dplyr::across(dplyr::where(is.character), toupper))
+  dplyr::mutate(dplyr::across(dplyr::where(is.character), toupper)) |>
+  dplyr::mutate(CPF_CNPJaut = padroniza_doc(CPF_CNPJaut))
 
 # Arrecadação
 cfem_arr <- readr::read_csv(file.path(PRE_PROC_DIR, "CFEM_Arrecadacao.csv"),
@@ -585,7 +631,8 @@ cfem_arr <- cfem_arr |>
   ) |>
   dplyr::filter(!is.na(PROCESSO), !is.na(ANO), !is.na(MES),
                 !is.na(SUBSarr), !is.na(CPF_CNPJarr), PROCESSO != "NA/NA") |>
-  dplyr::mutate(dplyr::across(dplyr::where(is.character), toupper))
+  dplyr::mutate(dplyr::across(dplyr::where(is.character), toupper)) |>
+  dplyr::mutate(CPF_CNPJarr = padroniza_doc(CPF_CNPJarr))
 
 # Razão social via Pessoa.txt
 pessoa <- readr::read_delim(
@@ -594,6 +641,7 @@ pessoa <- readr::read_delim(
   col_types = readr::cols(.default = "c"), show_col_types = FALSE
 ) |>
   dplyr::rename(CPF_CNPJarr = NRCPFCNPJ, NOME_arr = NMPessoa) |>
+  dplyr::mutate(CPF_CNPJarr = padroniza_doc(CPF_CNPJarr)) |>
   dplyr::select(CPF_CNPJarr, NOME_arr) |>
   dplyr::distinct(CPF_CNPJarr, .keep_all = TRUE) |>
   dplyr::mutate(NOME_arr = toupper(NOME_arr))
@@ -601,13 +649,18 @@ pessoa <- readr::read_delim(
 # Razão social via dado intenro GP (fallback p/ quem não está em Pessoa.txt)
 RazaoSocial <- readr::read_csv(file.path(RAW_DIR, "cefem_arrecadacao(semshapes).csv"), show_col_types = FALSE) |>
   dplyr::rename(CPF_CNPJarr = cnpj_cpf, NOME_arr_alt = razao_social) |>
+  dplyr::mutate(CPF_CNPJarr = padroniza_doc(CPF_CNPJarr)) |>
   dplyr::select(CPF_CNPJarr, NOME_arr_alt) |>
   dplyr::distinct(CPF_CNPJarr, .keep_all = TRUE) |>
   dplyr::mutate(NOME_arr_alt = toupper(NOME_arr_alt))
 
 cfem_arr <- cfem_arr |>
-  dplyr::left_join(pessoa, by = "CPF_CNPJarr") |>
-  dplyr::mutate(NOME_arr = dplyr::if_else(is.na(NOME_arr), "NOME DESCONHECIDO", NOME_arr))
+  dplyr::left_join(pessoa,      by = "CPF_CNPJarr") |>
+  dplyr::left_join(RazaoSocial, by = "CPF_CNPJarr") |>
+  dplyr::mutate(
+    NOME_arr = dplyr::coalesce(NOME_arr, NOME_arr_alt, "NOME DESCONHECIDO")
+  ) |>
+  dplyr::select(-NOME_arr_alt)
 
 # Filtro Amazônia Legal (mesma lista de processos do bloco 3) 
 cfem_arr_amzl0 <- cfem_arr |>
@@ -675,6 +728,7 @@ cfem_arr_amzl3 <- cfem_arr_amzl2 |>
     preco_g_orig = dplyr::if_else(!is.na(PESO_G) & PESO_G > 0, VALORtot / PESO_G, NA_real_)
   )
 
+# ---- ROBUSTO ----
 # Funções da correção de peso (mediana hierárquica + PowerOf10) 
 compute_median_hierarchical <- function(df, preco_col = "preco_g_orig",
                                         min_muni, min_state, min_month,
@@ -747,45 +801,153 @@ suggest_weight_row <- function(VALORtot, PESO_G, med_preco,
        candidate_name = as.character(best$name))
 }
 
-# Correção do OURO
-cfem_arr_amzl4 <- cfem_arr_amzl3 |>
-  dplyr::filter(SUBSarrSIM == "OURO" &
-                  FASE %in% c("LAVRA GARIMPEIRA","REQUERIMENTO DE LAVRA GARIMPEIRA"))
+FASES_CORR <- c("LAVRA GARIMPEIRA", "REQUERIMENTO DE LAVRA GARIMPEIRA",
+                "LICENCIAMENTO", "AUTORIZAÇÃO DE PESQUISA")
 
-med_info <- compute_median_hierarchical(
-  cfem_arr_amzl4, preco_col = "preco_g_orig",
-  min_muni = min_grp_muni, min_state = min_grp_state, min_month = min_grp_month,
-  min_ano = min_grp_ano, min_global = min_grp_global,
-  max_med_plaus = max_mediana_plausivel, min_med_plaus = min_mediana_plausivel
-)
-
-cfem_arr_amzl5 <- cfem_arr_amzl4 |>
-  dplyr::mutate(med_preco_base = med_info$med, med_level = med_info$level) |>
-  dplyr::rowwise() |>
-  dplyr::mutate(sug = list(suggest_weight_row(VALORtot, PESO_G, med_preco_base))) |>
-  tidyr::unnest_wider(sug) |>
-  dplyr::ungroup() |>
+cfem_final <- cfem_arr_amzl3 |>
   dplyr::mutate(
-    PESO_G_final  = dplyr::if_else(!is.na(PESO_G_sugerido), PESO_G_sugerido, PESO_G),
-    PESO_KG_final = dplyr::if_else(!is.na(PESO_G_final), PESO_G_final / 1000, NA_real_),
-    preco_g_final = dplyr::if_else(!is.na(PESO_G_final) & PESO_G_final > min_peso_g,
-                                   VALORtot / PESO_G_final, NA_real_)
+    PESO_G_final  = PESO_G,
+    PESO_KG_final = PESO_KG,
+    preco_g_final = preco_g_orig,
+    corr          = "original"
   )
 
-cfem_corr_join <- cfem_arr_amzl5 |>
-  dplyr::select(row_id, candidate_name, PESO_G_final, PESO_KG_final, preco_g_final) |>
-  dplyr::rename(corr = candidate_name)
+# ---- SIMPLES ----
+# Corrige PESO_G por fator 10^k (k de -6 a 6), menor |k| que traz VALORtot/peso à faixa (R$/g).
+fatores_simples <- 10^(-6:6)
+corrige_simples_g <- function(peso_g, valortot, pmin_g, pmax_g) {
+  if (is.na(peso_g) || is.na(valortot) || peso_g <= 0 || valortot <= 0)
+    return(c(peso = peso_g, fator = NA_real_))
+  ok <- fatores_simples[ {p <- valortot / (peso_g * fatores_simples); p >= pmin_g & p <= pmax_g} ]
+  if (length(ok) == 0) return(c(peso = peso_g, fator = NA_real_))
+  f <- ok[which.min(abs(log10(ok)))]
+  c(peso = peso_g * f, fator = f)
+}
 
-cfem_final <- dplyr::left_join(cfem_arr_amzl3, cfem_corr_join, by = "row_id") |>
-  dplyr::mutate(
-    PESO_G_final  = dplyr::if_else(is.na(PESO_G_final), PESO_G, PESO_G_final),
-    PESO_KG_final = dplyr::if_else(is.na(PESO_KG_final), PESO_KG, PESO_KG_final),
-    preco_g_final = dplyr::if_else(is.na(preco_g_final),
-                                   dplyr::if_else(!is.na(PESO_G_final) & PESO_G_final > min_peso_g,
-                                                  VALORtot / PESO_G_final, NA_real_),
-                                   preco_g_final),
-    corr = dplyr::if_else(is.na(corr), "original", corr)
-  ) |>
+# ---- helper de check: conta fora da faixa (R$/kg), por fase ----
+report_check <- function(df, mineral, etapa, pmin_kg, pmax_kg) {
+  d <- df |>
+    dplyr::filter(!is.na(PESO_KG_final), PESO_KG_final > 0, !is.na(VALORtot), VALORtot > 0) |>
+    dplyr::mutate(rs_por_kg = VALORtot / PESO_KG_final,
+                  fora = rs_por_kg < pmin_kg | rs_por_kg > pmax_kg)
+  message(sprintf("[%s] %s | avaliados: %d | fora de [%g-%g] R$/kg: %d",
+                  mineral, etapa, nrow(d), pmin_kg, pmax_kg, sum(d$fora, na.rm = TRUE)))
+  print(d |> dplyr::count(FASE, fora) |> dplyr::arrange(dplyr::desc(fora), dplyr::desc(n)))
+  invisible(d)
+}
+
+# ---- ciclo completo (3 checks) para UM mineral ----
+corrige_mineral_3checks <- function(cfem_final, mineral_label,
+                                     subs_keep, subs_col,
+                                     pmin_kg, pmax_kg,
+                                     min_med_plaus, max_med_plaus) {
+  pmin_g <- pmin_kg / 1000; pmax_g <- pmax_kg / 1000
+
+  universo <- cfem_final |>
+    dplyr::filter(.data[[subs_col]] %in% subs_keep, FASE %in% FASES_CORR)
+
+  # CHECK 1
+  report_check(universo, mineral_label, "CHECK 1 (antes)", pmin_kg, pmax_kg)
+
+  # ROBUSTO
+  med_info <- compute_median_hierarchical(
+    universo, preco_col = "preco_g_orig",
+    min_muni = min_grp_muni, min_state = min_grp_state, min_month = min_grp_month,
+    min_ano = min_grp_ano, min_global = min_grp_global,
+    max_med_plaus = max_med_plaus, min_med_plaus = min_med_plaus
+  )
+
+  rob <- universo |>
+    dplyr::mutate(med_preco_base = med_info$med, med_level = med_info$level) |>
+    dplyr::rowwise() |>
+    dplyr::mutate(sug = list(suggest_weight_row(VALORtot, PESO_G, med_preco_base,
+                                                p_range = p_round_min:p_round_max))) |>
+    tidyr::unnest_wider(sug) |>
+    dplyr::ungroup() |>
+    dplyr::mutate(
+      PESO_G_final  = dplyr::if_else(!is.na(PESO_G_sugerido), PESO_G_sugerido, PESO_G),
+      PESO_KG_final = dplyr::if_else(!is.na(PESO_G_final), PESO_G_final / 1000, NA_real_),
+      preco_g_final = dplyr::if_else(!is.na(PESO_G_final) & PESO_G_final > min_peso_g,
+                                     VALORtot / PESO_G_final, NA_real_),
+      corr = dplyr::if_else(is.na(candidate_name), "original", candidate_name)
+    )
+
+  cfem_final <- cfem_final |>
+    dplyr::left_join(
+      rob |> dplyr::select(row_id, PESO_G_final, PESO_KG_final, preco_g_final, corr) |>
+        dplyr::rename(PESO_G_r = PESO_G_final, PESO_KG_r = PESO_KG_final,
+                      preco_g_r = preco_g_final, corr_r = corr),
+      by = "row_id") |>
+    dplyr::mutate(
+      PESO_G_final  = dplyr::if_else(!is.na(PESO_G_r),  PESO_G_r,  PESO_G_final),
+      PESO_KG_final = dplyr::if_else(!is.na(PESO_KG_r), PESO_KG_r, PESO_KG_final),
+      preco_g_final = dplyr::if_else(!is.na(preco_g_r), preco_g_r, preco_g_final),
+      corr          = dplyr::if_else(!is.na(corr_r),    corr_r,    corr)
+    ) |>
+    dplyr::select(-PESO_G_r, -PESO_KG_r, -preco_g_r, -corr_r)
+
+  # CHECK 2
+  univ2 <- cfem_final |> dplyr::filter(.data[[subs_col]] %in% subs_keep, FASE %in% FASES_CORR)
+  d2 <- report_check(univ2, mineral_label, "CHECK 2 (pos-robusto)", pmin_kg, pmax_kg)
+  ids_fora <- d2 |> dplyr::filter(fora) |> dplyr::pull(row_id)
+
+  # SIMPLES (só remanescentes)
+  if (length(ids_fora) > 0) {
+    fb <- cfem_final |>
+      dplyr::filter(row_id %in% ids_fora) |>
+      dplyr::rowwise() |>
+      dplyr::mutate(.r = list(corrige_simples_g(PESO_G_final, VALORtot, pmin_g, pmax_g)),
+                    PESO_G_fb = .r[["peso"]], fator_fb = .r[["fator"]]) |>
+      dplyr::ungroup() |>
+      dplyr::select(row_id, PESO_G_fb, fator_fb)
+
+    cfem_final <- cfem_final |>
+      dplyr::left_join(fb, by = "row_id") |>
+      dplyr::mutate(
+        aplicou = !is.na(fator_fb) & fator_fb != 1,
+        PESO_G_final  = dplyr::if_else(aplicou, PESO_G_fb,        PESO_G_final),
+        PESO_KG_final = dplyr::if_else(aplicou, PESO_G_fb / 1000, PESO_KG_final),
+        preco_g_final = dplyr::if_else(aplicou & PESO_G_final > min_peso_g,
+                                       VALORtot / PESO_G_final,   preco_g_final),
+        corr = dplyr::if_else(aplicou, paste0("simples_1e", round(log10(fator_fb))), corr)
+      ) |>
+      dplyr::select(-PESO_G_fb, -fator_fb, -aplicou)
+    message("[", mineral_label, "] SIMPLES aplicado a ", length(ids_fora), " remanescente(s).")
+  } else {
+    message("[", mineral_label, "] nenhum remanescente para o metodo simples.")
+  }
+
+  # CHECK 3 (FINAL)
+  univ3 <- cfem_final |> dplyr::filter(.data[[subs_col]] %in% subs_keep, FASE %in% FASES_CORR)
+  d3 <- report_check(univ3, mineral_label, "CHECK 3 (final)", pmin_kg, pmax_kg)
+  resta <- d3 |> dplyr::filter(fora)
+  if (nrow(resta) > 0) {
+    message("[", mineral_label, "] IRRECUPERAVEIS (provavel dado corrompido) — revisar:")
+    print(resta |> dplyr::select(PROCESSO, FASE, PESO_KG, PESO_KG_final, VALORtot, rs_por_kg))
+  }
+  message("[", mineral_label, "] distribuicao final de 'corr':")
+  print(univ3 |> dplyr::count(corr, sort = TRUE))
+
+  cfem_final
+}
+
+# ---- CASSITERITA (faixa de mercado R$30-300/kg = 0,03-0,30 R$/g) ----
+cfem_final <- corrige_mineral_3checks(
+  cfem_final, "CASSITERITA",
+  subs_keep = "CASSITERITA", subs_col = "SUBSarr",
+  pmin_kg = 30, pmax_kg = 300,
+  min_med_plaus = 0.03, max_med_plaus = 0.30
+)
+
+# ---- OURO (limites mantidos do original: 30-1000 R$/g = 30.000-1.000.000 R$/kg) ----
+cfem_final <- corrige_mineral_3checks(
+  cfem_final, "OURO",
+  subs_keep = "OURO", subs_col = "SUBSarrSIM",
+  pmin_kg = 30 * 1000, pmax_kg = 1000 * 1000,
+  min_med_plaus = 30, max_med_plaus = 1000
+)
+
+cfem_final <- cfem_final |>
   dplyr::mutate(
     ULT_EV_ID  = stringr::str_extract(ULT_EVENTO, "^\\d+"),
     ULT_EV_DAT = as.Date(stringr::str_extract(ULT_EVENTO, "\\d{2}/\\d{2}/\\d{4}$"), format = "%d/%m/%Y"),
@@ -793,67 +955,74 @@ cfem_final <- dplyr::left_join(cfem_arr_amzl3, cfem_corr_join, by = "row_id") |>
       ULT_EVENTO, paste0(ULT_EV_ID, " - |EM ", ULT_EV_DAT)))
   )
 
-# Correção da CASSITERITA
-cfem_final <- cfem_final |> dplyr::mutate(row_id = dplyr::row_number())
+cfem_final <- cfem_final |> dplyr::select(-dplyr::any_of("row_id"))
 
-max_mediana_plausivel_cass <- 0.15
-min_mediana_plausivel_cass <- 0.02
-# max_mediana_plausivel_cass <- 0.15
-# min_mediana_plausivel_cass <- 0.0001
-
-cass_amzl4 <- cfem_final |>
-  dplyr::filter(SUBSarr == "CASSITERITA" &
-                  FASE %in% c("LAVRA GARIMPEIRA","REQUERIMENTO DE LAVRA GARIMPEIRA"))
-
-med_info_cass <- compute_median_hierarchical(
-  cass_amzl4, preco_col = "preco_g_orig",
-  min_muni = min_grp_muni, min_state = min_grp_state, min_month = min_grp_month,
-  min_ano = min_grp_ano, min_global = min_grp_global,
-  max_med_plaus = max_mediana_plausivel_cass, min_med_plaus = min_mediana_plausivel_cass
-)
-
-cass_amzl5 <- cass_amzl4 |>
-  dplyr::mutate(med_preco_base = med_info_cass$med, med_level = med_info_cass$level) |>
-  dplyr::rowwise() |>
-  dplyr::mutate(sug = list(suggest_weight_row(VALORtot, PESO_G, med_preco_base,
-                                              p_range = p_round_min:p_round_max))) |>
-  tidyr::unnest_wider(sug) |>
-  dplyr::ungroup() |>
-  dplyr::mutate(
-    PESO_G_final  = dplyr::if_else(!is.na(PESO_G_sugerido), PESO_G_sugerido, PESO_G),
-    PESO_KG_final = dplyr::if_else(!is.na(PESO_G_final), PESO_G_final / 1000, NA_real_),
-    preco_g_final = dplyr::if_else(!is.na(PESO_G_final) & PESO_G_final > min_peso_g,
-                                   VALORtot / PESO_G_final, NA_real_)
-  )
-
-cass_corr_join <- cass_amzl5 |>
-  dplyr::select(row_id, candidate_name, PESO_G_final, PESO_KG_final, preco_g_final) |>
-  dplyr::rename(corr_new = candidate_name, PESO_G_final_new = PESO_G_final,
-                PESO_KG_final_new = PESO_KG_final, preco_g_final_new = preco_g_final)
+# cfem sem municipio - trazendo do processo 
+pma_muni <- as.data.frame(load_ckpt("04_pma_amzl")) |>
+  dplyr::select(PROCESSO, munic_pma = munic, uf_pma = uf)
 
 cfem_final <- cfem_final |>
-  dplyr::left_join(cass_corr_join, by = "row_id") |>
+  dplyr::left_join(pma_muni, by = "PROCESSO") |>
   dplyr::mutate(
-    PESO_G_final  = dplyr::if_else(!is.na(PESO_G_final_new),  PESO_G_final_new,  PESO_G_final),
-    PESO_KG_final = dplyr::if_else(!is.na(PESO_KG_final_new), PESO_KG_final_new, PESO_KG_final),
-    preco_g_final = dplyr::if_else(!is.na(preco_g_final_new), preco_g_final_new, preco_g_final),
-    corr          = dplyr::if_else(!is.na(corr_new),          corr_new,          corr)
+    muni_falta = is.na(name_muni) | name_muni == "" | code_muni == 0 | code_muni == "0",
+    preencheu_pma = muni_falta & !is.na(munic_pma),
+    name_muni    = dplyr::if_else(preencheu_pma, munic_pma, name_muni),
+    abbrev_state = dplyr::if_else(preencheu_pma & (is.na(abbrev_state) | abbrev_state == ""),
+                                  uf_pma, abbrev_state),
+    muni_fonte_cfem = dplyr::if_else(preencheu_pma, "herdado_pma", "cfem_original")
   ) |>
-  dplyr::select(-PESO_G_final_new, -PESO_KG_final_new, -preco_g_final_new, -corr_new)
-
-cfem_final <- cfem_final |> dplyr::select(-dplyr::any_of("row_id"))
+  dplyr::select(-munic_pma, -uf_pma, -muni_falta, -preencheu_pma)
 
 save_ckpt(cfem_final,    "06_cfem_final")
 save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
 
-# # VISUALIZAÇÃO 1 ==============================================================
+# # ---- CHECKS ----
+# # Cassiterita
+# cass_check <- cfem_final |>
+#   dplyr::filter(SUBSarr == "CASSITERITA", FASE %in% FASES_CORR)
+# med_dbg <- compute_median_hierarchical(
+#   cass_check, preco_col = "preco_g_orig",
+#   min_muni = min_grp_muni, min_state = min_grp_state, min_month = min_grp_month,
+#   min_ano = min_grp_ano, min_global = min_grp_global,
+#   max_med_plaus = 0.30, min_med_plaus = 0.03
+# )
+# table(med_dbg$level, useNA = "always")
 
+# cfem_final |>
+#   dplyr::filter(SUBSarr == "CASSITERITA", FASE %in% FASES_CORR,
+#                 PESO_KG_final > 0, VALORtot > 0) |>
+#   dplyr::mutate(rs_kg = VALORtot / PESO_KG_final) |>
+#   dplyr::summarise(
+#     n = dplyr::n(),
+#     min = min(rs_kg), p25 = quantile(rs_kg, .25), mediana = median(rs_kg),
+#     p75 = quantile(rs_kg, .75), max = max(rs_kg)
+#   )
+
+# # Ouro
+# ouro_check <- cfem_final |>
+#   dplyr::filter(SUBSarrSIM == "OURO", FASE %in% FASES_CORR)
+# med_dbg_ouro <- compute_median_hierarchical(
+#   ouro_check, preco_col = "preco_g_orig",
+#   min_muni = min_grp_muni, min_state = min_grp_state, min_month = min_grp_month,
+#   min_ano = min_grp_ano, min_global = min_grp_global,
+#   max_med_plaus = 1000, min_med_plaus = 30
+# )
+# table(med_dbg_ouro$level, useNA = "always")
+
+# cfem_final |>
+#   dplyr::filter(SUBSarrSIM == "OURO", FASE %in% FASES_CORR,
+#                 PESO_KG_final > 0, VALORtot > 0) |>
+#   dplyr::mutate(rs_kg = VALORtot / PESO_KG_final) |>
+#   dplyr::summarise(
+#     n = dplyr::n(),
+#     min = min(rs_kg), p25 = quantile(rs_kg, .25), mediana = median(rs_kg),
+#     p75 = quantile(rs_kg, .75), max = max(rs_kg)
+#   )
+
+# # VISUALIZAÇÃO 1 ==============================================================
 # df_temporal_unificado <- cfem_final |>
 #   dplyr::filter(SUBSarrSIM %in% c("OURO") | SUBSarr == "CASSITERITA") |>
-#   dplyr::filter(
-#     str_detect(toupper(FASE), "GARIMPEIRA")
-#   ) |> 
-#   #dplyr::filter(data >= as.Date("2018-01-01")) |> 
+#   dplyr::filter(str_detect(toupper(FASE), "GARIMPEIRA")) |> 
 #   dplyr::mutate(
 #     substancia_plot = factor(dplyr::if_else(SUBSarr == "CASSITERITA", "CASSITERITA", "OURO"), 
 #                              levels = c("CASSITERITA", "OURO")),
@@ -863,16 +1032,14 @@ save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
 #   dplyr::summarise(
 #     `1. Valor Arrecadado (R$)_Orig`   = sum(VALORarr, na.rm = TRUE),
 #     `1. Valor Arrecadado (R$)_Corr`   = sum(VALORarr, na.rm = TRUE),
-    
 #     `2. Peso Declarado (Kg)_Orig`     = sum(PESO_KG, na.rm = TRUE),
 #     `2. Peso Declarado (Kg)_Corr`     = sum(PESO_KG_final, na.rm = TRUE),
-    
 #     `3. Relação (R$/Kg)_Orig` = dplyr::if_else(sum(PESO_KG, na.rm = TRUE) > 0, 
-#                                                    sum(VALORtot, na.rm = TRUE) / sum(PESO_KG, na.rm = TRUE), 
-#                                                    NA_real_),
+#                                                sum(VALORtot, na.rm = TRUE) / sum(PESO_KG, na.rm = TRUE), 
+#                                                NA_real_),
 #     `3. Relação (R$/Kg)_Corr` = dplyr::if_else(sum(PESO_KG_final, na.rm = TRUE) > 0, 
-#                                                    sum(VALORtot, na.rm = TRUE) / sum(PESO_KG_final, na.rm = TRUE), 
-#                                                    NA_real_),
+#                                                sum(VALORtot, na.rm = TRUE) / sum(PESO_KG_final, na.rm = TRUE), 
+#                                                NA_real_),
 #     .groups = "drop"
 #   ) |>
 #   tidyr::pivot_longer(
@@ -892,6 +1059,7 @@ save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
 #     )
 #   ) |>
 #   dplyr::filter(!is.na(valor_metrica) & valor_metrica > 0)
+
 # cores_customizadas <- c(
 #   "Valor Arrecadado (Inalterado)" = "#1e3799",
 #   "Peso Original"                 = "#e74c3c",
@@ -901,43 +1069,33 @@ save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
 # )
 
 # p_linhas <- ggplot(df_temporal_unificado, aes(x = data, y = valor_metrica, 
-#                                   color = label_cor, 
-#                                   linetype = cenario, 
-#                                   alpha = cenario)) +
+#                                           color = label_cor, 
+#                                           linetype = cenario, 
+#                                           alpha = cenario)) +
 #   geom_line(size = 0.8) +
 #   geom_point(size = 1.4) +
 #   scale_y_log10(labels = scales::label_comma()) +
-#   #facet_wrap(~ substancia_plot + metrica, scales = "free_y", ncol = 3) +
 #   facet_grid(metrica ~ substancia_plot, scales = "free_y") +
 #   scale_color_manual(values = cores_customizadas) + 
 #   scale_linetype_manual(values = c("Antes (Original)" = "dashed", "Depois (pow10)" = "solid")) + 
 #   scale_alpha_manual(values = c("Antes (Original)" = 0.4, "Depois (pow10)" = 1.0)) +            
 #   theme_bw() +
-#   labs(
-#     x = "",
-#     y = "Valores em Escala Log10",
-#     color = ""
-#   ) +
-#   guides(
-#     color = guide_legend(title = NULL, nrow = 1),
-#     linetype = "none",
-#     alpha = "none"
-#   ) +
+#   labs(x = "", y = "Valores em Escala Log10", color = "") +
+#   guides(color = guide_legend(title = NULL, nrow = 1), linetype = "none", alpha = "none") +
 #   theme(
 #     axis.text.x = element_text(angle = 45, hjust = 1),
 #     legend.position = "bottom",
 #     strip.text = element_text(face = "bold", size = 9),
 #     panel.grid.minor = element_blank()
 #   )
-
-# p_linhas
+# # [EXPORTAÇÃO 1]
+# ggsave(filename = file.path(CKPT_DIR, "01_serie_temporal_unificada.png"), 
+#        plot = p_linhas, width = 11, height = 8.5, dpi = 300)
 
 # # VISUALIZAÇÃO 2 ==============================================================
-
 # df_scatterplot_clean <- cfem_final |>
 #   dplyr::filter(SUBSarrSIM %in% c("OURO") | SUBSarr == "CASSITERITA") |>
 #   dplyr::filter(str_detect(toupper(FASE), "GARIMPEIRA")) |>
-#   #dplyr::filter(data >= as.Date("2018-01-01")) |>
 #   dplyr::mutate(
 #     substancia_plot = factor(dplyr::if_else(SUBSarr == "CASSITERITA", "CASSITERITA", "OURO"), 
 #                              levels = c("CASSITERITA", "OURO")),
@@ -966,22 +1124,71 @@ save_ckpt(cfem_aut_amzl, "06_cfem_aut_amzl")
 #   facet_grid(substancia_plot ~ cenario, scales = "free_y") +
 #   scale_color_manual(values = cores_scatterplot) +
 #   theme_bw() +
-#   labs(
-#     x = "",
-#     y = "R$/kg (Escala Log10)",
-#     color = ""
-#   ) +
-#   guides(
-#     color = guide_legend(title = NULL, nrow = 1)
-#   ) +
+#   labs(x = "", y = "R$/kg (Escala Log10)", color = "") +
+#   guides(color = guide_legend(title = NULL, nrow = 1)) +
 #   theme(
 #     axis.text.x = element_text(angle = 45, hjust = 1),
 #     legend.position = "bottom",
 #     strip.text = element_text(face = "bold", size = 9),
 #     panel.grid.minor = element_blank()
 #   )
+# # [EXPORTAÇÃO 2]
+# ggsave(filename = file.path(CKPT_DIR, "02_scatterplot_precos.png"), 
+#        plot = p_scatter, width = 11, height = 7, dpi = 300)
 
-# p_scatter
+
+# # VISUALIZAÇÃO 3 ==============================================================
+# prep_violino <- function(df) {
+#   df |>
+#     filter(PESO_KG > 0, PESO_KG_final > 0, VALORtot > 0, FASE %in% FASES_CORR) |>
+#     mutate(
+#       `Antes`  = VALORtot / PESO_KG,
+#       `Depois` = VALORtot / PESO_KG_final
+#     ) |>
+#     pivot_longer(c(Antes, Depois), names_to = "cenario", values_to = "rs_kg") |>
+#     mutate(cenario = factor(cenario, levels = c("Antes", "Depois")))
+# }
+
+# faixa_ref <- function(pmin, pmax) {
+#   annotate("rect", xmin = -Inf, xmax = Inf, ymin = pmin, ymax = pmax,
+#            alpha = 0.08, fill = "forestgreen")
+# }
+
+# p_violino_cassiterita <- prep_violino(cfem_final |> filter(SUBSarr == "CASSITERITA")) |>
+#   ggplot(aes(cenario, rs_kg, fill = cenario)) +
+#   faixa_ref(30, 300) +
+#   geom_violin(scale = "width", alpha = 0.8, color = NA) +
+#   geom_boxplot(width = 0.12, outlier.size = 0.4, alpha = 0.6) +
+#   facet_wrap(~ FASE, scales = "free_x", nrow = 1) + 
+#   scale_y_log10(labels = scales::comma) +
+#   scale_fill_manual(values = c("Antes" = "#e74c3c", "Depois" = "#2D6A4F")) +
+#   labs(#title = "Cassiterita — preço implícito (R$/kg) por fase, antes e depois da correção",
+#        x = NULL, y = "R$/kg (log)", fill = NULL) +
+#   theme_minimal() + 
+#   theme(legend.position = "bottom", plot.title = element_text(face = "bold", size = 11))
+
+# # [EXPORTAÇÃO 3]
+# ggsave(filename = file.path(CKPT_DIR, "03_violino_cassiterita.png"), 
+#        plot = p_violino_cassiterita, width = 12, height = 5, dpi = 300)
+
+# # VISUALIZAÇÃO 4 ==============================================================
+# p_violino_ouro <- prep_violino(cfem_final |> filter(SUBSarrSIM == "OURO")) |>
+#   ggplot(aes(cenario, rs_kg, fill = cenario)) +
+#   faixa_ref(30000, 1000000) +
+#   geom_violin(scale = "width", alpha = 0.8, color = NA) +
+#   geom_boxplot(width = 0.12, outlier.size = 0.4, alpha = 0.6) +
+#   # O 'nrow = 1' força todas as fases a ficarem lado a lado
+#   facet_wrap(~ FASE, scales = "free_x", nrow = 1) + 
+#   scale_y_log10(labels = scales::comma) +
+#   scale_fill_manual(values = c("Antes" = "#e74c3c", "Depois" = "#1e3799")) +
+#   labs(#title = "Ouro — preço implícito (R$/kg) por fase, antes e depois da correção",
+#        x = NULL, y = "R$/kg (log)", fill = NULL) +
+#   theme_minimal() + 
+#   theme(legend.position = "bottom", plot.title = element_text(face = "bold", size = 11))
+
+# # [EXPORTAÇÃO 4]
+# ggsave(filename = file.path(CKPT_DIR, "04_violino_ouro.png"), 
+#        plot = p_violino_ouro, width = 12, height = 5, dpi = 300)
 
 # =============================================================================
 # BLOCO 7 — AGREGAÇÕES DA CFEM POR PROCESSO
@@ -1021,11 +1228,13 @@ arr_corr_unique <- cfem_final |>
 pma_tp <- pma_tp |>
   dplyr::mutate(
     SUBSpmaGRP = classificar_grupo(SUBS),
-    ULT_EV_ID  = stringr::str_extract(ULT_EVENTO, "^\\d+"),
-    ULT_EV_DAT = stringr::str_extract(ULT_EVENTO, "\\d{2}/\\d{2}/\\d{4}$"),
-    ULT_EV_DES = stringr::str_trim(stringr::str_remove_all(
-      ULT_EVENTO, paste0(ULT_EV_ID, " - |EM ", ULT_EV_DAT)))
-  )
+    ULT_EV_ID   = stringr::str_extract(ULT_EVENTO, "^\\d+"),
+    ULT_EV_DAT_txt = stringr::str_extract(ULT_EVENTO, "\\d{2}/\\d{2}/\\d{4}$"),
+    ULT_EV_DES  = stringr::str_trim(stringr::str_remove_all(
+      ULT_EVENTO, paste0(ULT_EV_ID, " - |EM ", ULT_EV_DAT_txt))),
+    ULT_EV_DAT  = as.Date(ULT_EV_DAT_txt, format = "%d/%m/%Y")
+  ) |>
+  dplyr::select(-ULT_EV_DAT_txt)
 
 cfem_aut_amzl <- load_ckpt("06_cfem_aut_amzl")
 
@@ -1117,5 +1326,3 @@ readr::write_csv(cfem_final,    file.path(RESULT_DB, "cfem_amzl_ALLminerals_GOLD
 readr::write_csv(cfem_aut_amzl, file.path(RESULT_DB, "cfem_aut_all_min_amzl.csv"))
 
 message("\n=== 03_final_proc.R v2 — CONCLUÍDO ===")
-
-#probe(pma_db, "final")
