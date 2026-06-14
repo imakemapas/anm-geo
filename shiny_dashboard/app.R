@@ -53,6 +53,24 @@ fases_anual  <- fases_all
 fases_mensal <- fases_all
 map_subs     <- cfem |> dplyr::distinct(SUBSarrSIM, SUBSarr)
 
+# ---- Lookups enxutos para filtros encadeados -------------------------------
+# Em vez de varrer o `cfem` inteiro (126 MB) a cada interação de filtro, os
+# observers consultam estas tabelas `distinct` pequenas. Mantêm a precisão de
+# período/fase (Opção B): cada lookup carrega apenas as colunas-chave daquele
+# nível do encadeamento, então colapsam de ~200k linhas para frações disso.
+
+# nível 1: (substância, fase, UF, ano) -> município
+lk_mun <- cfem |>
+  dplyr::distinct(SUBSarrSIM, SUBSarr, FASE, abbrev_state, ANO, name_muni)
+
+# nível 2: (UF, município) -> titular, processo
+lk_tit_proc <- cfem |>
+  dplyr::distinct(abbrev_state, name_muni, TITULAR, PROCESSO)
+
+# nível 3: (UF, município, titular, processo) -> declarante
+lk_decl <- cfem |>
+  dplyr::distinct(abbrev_state, name_muni, TITULAR, PROCESSO, NOME_arr)
+
 # ---- Primeira aba ordem colunas + rótulos amigáveis ----
 cols_visible <- c(
   "SUBSarrSIM",
@@ -948,35 +966,39 @@ server <- function(input, output, session) {
   sync_pair(session, "subs_tab1", "subs_det_tab1", map_subs, "SUBSarrSIM", "SUBSarr")
 
   observeEvent(list(input$subs_tab1, input$subs_det_tab1, input$ufs_tab1, input$fases_tab1, input$periodo_tab1), {
-    df_temp <- cfem |>
+    df_temp <- lk_mun |>
       dplyr::filter(
         ANO >= input$periodo_tab1[1], ANO <= input$periodo_tab1[2],
         FASE %in% input$fases_tab1, abbrev_state %in% input$ufs_tab1
       )
     if (length(input$subs_det_tab1)) { df_temp <- df_temp |> dplyr::filter(SUBSarr %in% input$subs_det_tab1) } else {
       df_temp <- df_temp |> dplyr::filter(SUBSarrSIM %in% input$subs_tab1) }
-    updatePickerInput(session, "muns_tab1", choices = sort(unique(df_temp$name_muni)),
-                      selected = intersect(isolate(input$muns_tab1), sort(unique(df_temp$name_muni))))
+    muns_ok <- sort(unique(df_temp$name_muni))
+    updatePickerInput(session, "muns_tab1", choices = muns_ok,
+                      selected = intersect(isolate(input$muns_tab1), muns_ok))
     rm(df_temp)
   }, ignoreInit = FALSE)
 
   observeEvent(list(input$muns_tab1, input$ufs_tab1), {
-    df_temp <- cfem |> dplyr::filter(abbrev_state %in% input$ufs_tab1, name_muni %in% input$muns_tab1)
-    updatePickerInput(session, "tits_tab1", choices = sort(unique(df_temp$TITULAR)),
-                      selected = intersect(isolate(input$tits_tab1), sort(unique(df_temp$TITULAR))))
-    updatePickerInput(session, "procs_tab1", choices = sort(unique(df_temp$PROCESSO)),
-                      selected = intersect(isolate(input$procs_tab1), sort(unique(df_temp$PROCESSO))))
+    df_temp <- lk_tit_proc |> dplyr::filter(abbrev_state %in% input$ufs_tab1, name_muni %in% input$muns_tab1)
+    tits_ok  <- sort(unique(df_temp$TITULAR))
+    procs_ok <- sort(unique(df_temp$PROCESSO))
+    updatePickerInput(session, "tits_tab1", choices = tits_ok,
+                      selected = intersect(isolate(input$tits_tab1), tits_ok))
+    updatePickerInput(session, "procs_tab1", choices = procs_ok,
+                      selected = intersect(isolate(input$procs_tab1), procs_ok))
     rm(df_temp)
   }, ignoreInit = FALSE)
 
   observeEvent(list(input$procs_tab1, input$tits_tab1), {
-    df_temp <- cfem |>
+    df_temp <- lk_decl |>
       dplyr::filter(
         abbrev_state %in% input$ufs_tab1, name_muni %in% input$muns_tab1,
         TITULAR %in% input$tits_tab1, PROCESSO %in% input$procs_tab1
       )
-    updatePickerInput(session, "decl_tab1", choices = sort(unique(df_temp$NOME_arr)),
-                      selected = intersect(isolate(input$decl_tab1), sort(unique(df_temp$NOME_arr))))
+    decl_ok <- sort(unique(df_temp$NOME_arr))
+    updatePickerInput(session, "decl_tab1", choices = decl_ok,
+                      selected = intersect(isolate(input$decl_tab1), decl_ok))
     rm(df_temp)
   }, ignoreInit = FALSE)
 
@@ -2126,10 +2148,3 @@ server <- function(input, output, session) {
 }
 
 shinyApp(ui, server)
-
-
-
-
-
-
-
