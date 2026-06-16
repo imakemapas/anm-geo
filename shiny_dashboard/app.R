@@ -1695,26 +1695,10 @@ server <- function(input, output, session) {
 
   # dados filtrados para o mapa da aba 3 (usando os inputs da aba 3)
   dados_mapa_cfem_tab3 <- reactive({
-    df <- cfem |>
-      dplyr::filter(
-        ANO >= input$periodo_tab3[1], ANO <= input$periodo_tab3[2],
-        FASE %in% input$fases_tab3,
-        MES >= input$meses_tab3[1], MES <= input$meses_tab3[2],
-        abbrev_state %in% input$ufs_tab3
-      )
-    if (length(input$subs_det_tab3)) { df <- df |> dplyr::filter(SUBSarr %in% input$subs_det_tab3) } else {
-      df <- df |> dplyr::filter(SUBSarrSIM %in% input$subs_tab3) }
-    if (length(input$muns_tab3)) df <- df |> dplyr::filter(name_muni %in% input$muns_tab3)
-    if (length(input$tits_tab3)) df <- df |> dplyr::filter(TITULAR %in% input$tits_tab3)
-    if (length(input$procs_tab3)) df <- df |> dplyr::filter(PROCESSO %in% input$procs_tab3)
-    if (length(input$decl_tab3)) df <- df |> dplyr::filter(NOME_arr %in% input$decl_tab3)
-    df <- filtra_sobrepos(df, flags = input$ov_flags_tab3)
-    df
-  }) |> bindCache(
-    input$periodo_tab3, input$meses_tab3, input$fases_tab3, input$ufs_tab3,
-    input$subs_tab3, input$subs_det_tab3, input$muns_tab3, input$tits_tab3,
-    input$procs_tab3, input$decl_tab3, input$ov_flags_tab3
-  ) |> debounce(250)
+    # Reusa dados_mensal (mesmos filtros; cfem_mensal = cfem + coluna 'data').
+    # Evita uma segunda varredura idêntica dos dados pesados a cada interação.
+    dados_mensal()
+  })
 
   pma_filtrado_tab3 <- reactive({
     procs <- unique(dados_mapa_cfem_tab3()$PROCESSO)

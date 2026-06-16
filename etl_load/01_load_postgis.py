@@ -30,7 +30,20 @@ engine = create_engine(DB_URL)
 # --- Caminhos ----------------------------------------------------------------
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 RESULT_DB = os.path.join(ROOT, "data", "result_db")
- 
+
+# # --- Nome colunas ------------------------------------------------------------
+# df = pd.read_csv(r"C:\GP\anm-geo\data\result_db\cfem_amzl_ALLminerals_GOLD_CASScorrected.csv", nrows=5)
+# for c in df.columns: 
+#     print("  ", c.lower())
+
+# g = gpd.read_file(r"C:\GP\anm-geo\data\result_db\pma_amzl_ALLminerals_final.geojson", rows=5)
+# for c in g.columns: 
+#     print("  ", c.lower())
+
+# a = pd.read_csv(r"C:\GP\anm-geo\data\result_db\cfem_aut_all_min_amzl.csv", nrows=5)
+# for c in a.columns: 
+#     print("  ", c.lower())
+
 # --- Helpers -----------------------------------------------------------------
 def carregar_geojson(arquivo, tabela):
     caminho = os.path.join(RESULT_DB, arquivo)

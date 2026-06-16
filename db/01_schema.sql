@@ -133,7 +133,8 @@ CREATE TABLE cfem_eventos (
     preco_g_final NUMERIC,
     ult_ev_id     NUMERIC,
     ult_ev_dat    DATE,
-    ult_ev_des    TEXT
+    ult_ev_des    TEXT,
+    muni_fonte_cfem TEXT
 );
 
 -- B.2 cfem_autuacoes (cfem_aut_all_min_amzl.csv) ------------------------------
