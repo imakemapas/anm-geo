@@ -338,51 +338,35 @@ safe_step("MMA CNUC protected areas (UC)", {
 })
 
 safe_step("INCRA Quilombolas", {
-
   zip_path <- file.path(RAW_DIR, "geo_incra", "areas_quilombolas.zip")
   exdir    <- file.path(TMP_DIR, "incra_quilombolas")
 
-  shp_zip <- NA_character_
+  shp_path <- NA_character_
 
+  # 1) tenta o ZIP
   if (safe_unzip(zip_path, exdir)) {
-    shp_zip <- first_match(exdir, "\\.shp$")
+    shp_path <- first_match(exdir, "\\.shp$")
   }
 
-  if (!is.na(shp_zip)) {
-
-    qui <- terra::vect(shp_zip) |> clean_geometry()
-
-    terra::writeVector(
-      qui,
-      file.path(PRE_PROC_DIR, "quilombolas.shp"),
-      overwrite = TRUE
+  # 2) fallback: shapefile local, procurando recursivamente nas subpastas
+  if (is.na(shp_path)) {
+    shp_local <- list.files(
+      file.path(RAW_DIR, "geo_incra"),
+      pattern = "\\.shp$", full.names = TRUE, recursive = TRUE
     )
-
-    message("Quilombolas saved (from ZIP).")
+    if (length(shp_local) > 0) shp_path <- shp_local[1]
   }
 
-  incra_local_dir <- file.path(RAW_DIR, "geo_incra")
-
-  shp_local <- list.files(
-    incra_local_dir,
-    pattern = "\\.shp$",
-    full.names = TRUE
-  )[1]
-
-  if (length(shp_local) == 0 || is.na(shp_local)) {
-    message("INCRA unavailable and no local shapefile found. Skipping.")
-    NULL
+  # 3) se ainda nao achou, pula de verdade
+  if (is.na(shp_path)) {
+    message("INCRA: nenhum .shp encontrado (ZIP nem local). Skipping.")
+    return(invisible(NULL))
   }
 
-  qui <- terra::vect(shp_local) |> clean_geometry()
-
-  terra::writeVector(
-    qui,
-    file.path(PRE_PROC_DIR, "quilombolas.shp"),
-    overwrite = TRUE
-  )
-
-  message("Quilombolas saved (local fallback).")
+  message("Quilombolas source: ", shp_path)
+  qui <- terra::vect(shp_path) |> clean_geometry()
+  terra::writeVector(qui, file.path(PRE_PROC_DIR, "quilombolas.shp"), overwrite = TRUE)
+  message("Quilombolas saved.")
 })
 
 # IBAMA / ICMBio / SEMA-MT ----------------------
@@ -443,7 +427,7 @@ safe_step("IBAMA infractions (csv)", {
 })
 
 safe_step("ICMBio embargos (shp)", {
-  zip_path <- file.path(RAW_DIR, "geo_federal", "embargos_icmbio_shp.zip")
+  zip_path <- file.path(RAW_DIR, "geo_federal", "embargos_icmbio.zip")
   exdir    <- file.path(TMP_DIR, "icmbio_embargos")
   
   if (!safe_unzip(zip_path, exdir)) stop("Missing or unreadable zip: ", zip_path)
@@ -464,7 +448,7 @@ safe_step("ICMBio embargos (shp)", {
 })
 
 safe_step("ICMBio infractions (shp)", {
-  zip_path <- file.path(RAW_DIR, "geo_federal", "autos_infracao_icmbio_shp.zip")
+  zip_path <- file.path(RAW_DIR, "geo_federal", "autos_infracao_icmbio.zip")
   exdir    <- file.path(TMP_DIR, "icmbio_infracoes")
   
   if (!safe_unzip(zip_path, exdir)) stop("Missing or unreadable zip: ", zip_path)
