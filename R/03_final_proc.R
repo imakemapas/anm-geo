@@ -1,17 +1,13 @@
 ################################################################################
-# 03_final_proc.R  —  versão 2
+# 03_final_proc.R 
 #
-# OBJETIVO GERAL
 #   Consolidar os dados limpos (saídos do 02_pre_proc.R) em três produtos:
-#     1) result_shiny/ — shapefile completo + CSVs para o dashboard Shiny
-#     2) result_gee/   — idem, recortado para o BIOMA Amazônia
+#     1) result_shiny/ — shapefile completo + CSVs para o dashboard Shiny (Amazônia Legal)
+#     2) result_gee/   — idem, porém recorte BIOMA Amazônia
 #     3) result_db/    — versão ENXUTA para carga no PostGIS
-
 ################################################################################
 
-# =============================================================================
 # SETUP & CONFIGURAÇÃO
-# =============================================================================
 
 rm(list = ls(all.names = TRUE))
 options(scipen = 999)
@@ -1338,4 +1334,4 @@ terra::writeVector(qui_amzl,    file.path(RESULT_DB, "qui_amzl.geojson"), filety
 readr::write_csv(cfem_final,    file.path(RESULT_DB, "cfem_amzl_ALLminerals_GOLD_CASScorrected.csv"))
 readr::write_csv(cfem_aut_amzl, file.path(RESULT_DB, "cfem_aut_all_min_amzl.csv"))
 
-message("\n=== 03_final_proc.R v2 — CONCLUÍDO ===")
+message("\n=== 03_final_proc.R — CONCLUÍDO ===")

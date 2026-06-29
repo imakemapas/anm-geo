@@ -1,5 +1,5 @@
 ###############################################################################
-# ETL - Processing, cleaning, and consolidation
+# 02_pre_proc.R - Processing, cleaning, and consolidation
 ###############################################################################
 
 # Setup & Configuration -----------------------------------------------------
@@ -588,3 +588,5 @@ summary_df <- purrr::imap_dfr(etl_log, ~{
 print(summary_df, row.names = FALSE)
 message("\nProcess finished.")
 unlink(TMP_DIR, recursive = TRUE, force = TRUE)
+
+message("\n=== 02_pre_procs.R — CONCLUÍDO ===")

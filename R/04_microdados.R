@@ -1,15 +1,8 @@
 ################################################################################
-# 04_microdados.R  —  filtragem dos microdados SCM para a Amazônia Legal
-
-# OBJETIVO
-#   Reduzir os 28 arquivos de microdados (Brasil inteiro, ~milhões de linhas)
-#   para apenas os processos da Amazônia Legal, e padronizar a chave de junção.
-#   Saída em data/result_db/microdados/ (formato Parquet), pronta p/ o Python.
+# 04_microdados.R  —  filtragem dos microdados SCM para a Amazônia Legal e padronizar a chave de junção.
 ################################################################################
 
-# =============================================================================
 # SETUP
-# =============================================================================
 
 rm(list = ls(all.names = TRUE))
 options(scipen = 999)
