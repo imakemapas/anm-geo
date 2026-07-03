@@ -10,148 +10,17 @@ options(timeout = 1800)
 suppressPackageStartupMessages({
   library(purrr)
   library(here)
+  library(readr)
+  library(dplyr)
+  library(tibble)
 })
 
-ROOT    <- here::here()
-RAW_DIR <- here::here("data", "raw_data")
+ROOT      <- here::here()
+RAW_DIR   <- here::here("data", "raw_data")
 
-# download_file <- function(url, dest_dir, filename = basename(url)) {
+source(here::here("R", "utils.R"))  # download_file, download_named_urls, sha256_file, hash_anterior
 
-#   dir.create(dest_dir, recursive = TRUE, showWarnings = FALSE)
-#   dst <- file.path(dest_dir, filename)
-
-#   if (
-#     filename == "tis_poligonais.zip" &&
-#     file.exists(dst) &&
-#     file.info(dst)$size > 1000
-#   ) {
-
-#     message("FUNAI file already exists. Skipping.")
-#     return(TRUE)
-
-#   }
-
-#   message("Downloading: ", filename)
-
-#   ok <- tryCatch({
-
-#     download.file(
-#       url,
-#       destfile = dst,
-#       mode = "wb",
-#       method = "libcurl"
-#     )
-
-#     if (!file.exists(dst) ||
-#         is.na(file.info(dst)$size) ||
-#         file.info(dst)$size == 0) {
-#       stop("Downloaded file is missing or empty.")
-#     }
-
-#     message("OK: ", filename, " | size=", file.info(dst)$size)
-#     TRUE
-
-#   }, error = function(e) {
-
-#     warning(
-#       "Download failed: ",
-#       filename,
-#       " | ",
-#       conditionMessage(e)
-#     )
-
-#     FALSE
-#   })
-
-#   invisible(ok)
-# }
-
-download_file <- function(
-  url,
-  dest_dir,
-  filename = basename(url),
-  max_attempts = 3
-) {
-
-  dir.create(dest_dir, recursive = TRUE, showWarnings = FALSE)
-  dst <- file.path(dest_dir, filename)
-
-  if (
-    filename == "tis_poligonais.zip" &&
-    file.exists(dst) &&
-    file.info(dst)$size > 1000
-  ) {
-    message("FUNAI file already exists. Skipping.")
-    return(TRUE)
-  }
-
-  for (attempt in seq_len(max_attempts)) {
-
-    message(
-      "Downloading: ",
-      filename,
-      " [",
-      attempt,
-      "/",
-      max_attempts,
-      "]"
-    )
-
-    ok <- tryCatch({
-
-      download.file(
-        url,
-        destfile = dst,
-        mode = "wb",
-        method = "libcurl"
-      )
-
-      if (!file.exists(dst) ||
-          is.na(file.info(dst)$size) ||
-          file.info(dst)$size == 0) {
-        stop("Downloaded file is missing or empty.")
-      }
-
-      TRUE
-
-    }, error = function(e) {
-
-      warning(
-        "Attempt ",
-        attempt,
-        " failed: ",
-        filename,
-        " | ",
-        conditionMessage(e)
-      )
-
-      FALSE
-    })
-
-    if (ok) {
-      message("OK: ", filename)
-      return(TRUE)
-    }
-
-    Sys.sleep(runif(1, 5, 15))
-  }
-
-  FALSE
-}
-
-download_named_urls <- function(named_urls, dest_dir) {
-  purrr::imap(named_urls, ~{
-    ok <- download_file(
-      url = .x,
-      dest_dir = dest_dir,
-      filename = .y
-    )
-    
-    Sys.sleep(runif(1, 1, 3))
-    
-    list(url = .x, dest = dest_dir, filename = .y, success = ok)
-  })
-}
+dir.create(MANIFEST_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # Config: ANM ------------------------------------------------------------------
 config_anm <- list(
@@ -213,12 +82,11 @@ config_anm <- list(
       "metadados-cfem.ods"
     )
   )
-  
   # ,
   # Tah = list(
   #   dest = "anm_Tah",
   #   base_url = "https://dadosabertos.anm.gov.br/TAH/",
-  #   files = c(      
+  #   files = c(
   #     "Tah.csv",
   #     "metadados-tah.ods")
   #)
@@ -286,19 +154,23 @@ sema_urls <- setNames(
 )
 
 geo_targets <- list(
-  list(name = "geo_funai",            dest = file.path(RAW_DIR, config_geo$funai$dest),            urls = config_geo$funai$urls),
-  list(name = "geo_federal",          dest = file.path(RAW_DIR, config_geo$ambiental_federal$dest), urls = config_geo$ambiental_federal$urls),
-  list(name = "geo_ibama",            dest = file.path(RAW_DIR, config_geo$ibama$dest),            urls = config_geo$ibama$urls),
-  list(name = "geo_sema_mt",          dest = file.path(RAW_DIR, config_geo$sema_mt$dest),          urls = sema_urls),
-  list(name = "geo_incra",            dest = file.path(RAW_DIR, config_geo$incra$dest),            urls = config_geo$incra$urls)
+  list(name = "geo_funai",   dest = file.path(RAW_DIR, config_geo$funai$dest),            urls = config_geo$funai$urls),
+  list(name = "geo_federal", dest = file.path(RAW_DIR, config_geo$ambiental_federal$dest), urls = config_geo$ambiental_federal$urls),
+  list(name = "geo_ibama",   dest = file.path(RAW_DIR, config_geo$ibama$dest),             urls = config_geo$ibama$urls),
+  list(name = "geo_sema_mt", dest = file.path(RAW_DIR, config_geo$sema_mt$dest),           urls = sema_urls),
+  list(name = "geo_incra",   dest = file.path(RAW_DIR, config_geo$incra$dest),             urls = config_geo$incra$urls)
 )
 
 # Run all targets --------------------------------------------------------------
 targets <- c(anm_targets, geo_targets)
 
+# Timestamp
+TS_EXECUCAO <- format(Sys.time(), "%Y-%m-%d_%H%M%S")
+
+manifests_anteriores <- listar_manifests_anteriores()
+
 results_list <- purrr::map(targets, \(t) {
-  message("\n--- Target: ", t$name, " ---")
-  download_named_urls(t$urls, t$dest)
+  download_named_urls(t$urls, t$dest, target_name = t$name)
 })
 
 # Finish ---------------------------------------------------------------------
@@ -308,15 +180,59 @@ erros          <- purrr::keep(todos_arquivos, ~ .x$success == FALSE)
 if (length(erros) > 0) {
   message("\n ATTENTION: ", length(erros), " download(s) failed.")
   purrr::walk(erros, ~ message(.x$filename))
-  
+
   tentar_denovo <- readline(prompt = "Would you like to try downloading these errors now?? (y/n): ")
-  
+
   if (tolower(tentar_denovo) == "y") {
-    message("\n--- downloading ... ---")
-    purrr::walk(erros, ~ {
-      download_file(url = .x$url, dest_dir = .x$dest, filename = .x$filename)
+    # Reprocessa só os que falharam
+    retries <- purrr::map(erros, ~ {
+      r <- download_file(url = .x$url, dest_dir = .x$dest_dir, filename = .x$filename)
+      list(
+        target = .x$target, filename = .x$filename, url = .x$url, dest_dir = .x$dest_dir,
+        success = r$success, sha256 = r$sha256, size_bytes = r$size_bytes,
+        attempts_used = r$attempts_used, note = paste0("retry_manual: ", r$note)
+      )
     })
+
+    for (r in retries) {
+      idx <- purrr::detect_index(
+        todos_arquivos,
+        ~ .x$dest_dir == r$dest_dir && .x$filename == r$filename
+      )
+      if (idx > 0) todos_arquivos[[idx]] <- r
+    }
   }
 } else {
   message("\nProcess completed successfully.")
 }
+
+# --- Manifest desta execução --------------------------------------------------
+manifest_df <- purrr::map_dfr(todos_arquivos, \(r) {
+  hash_ant <- hash_anterior(r$dest_dir, r$filename, manifests = manifests_anteriores)
+  tibble::tibble(
+    timestamp_execucao = TS_EXECUCAO,
+    target              = r$target,
+    filename            = r$filename,
+    url                 = r$url,
+    dest_dir            = r$dest_dir,
+    success             = r$success,
+    sha256              = r$sha256,
+    sha256_anterior     = hash_ant,
+    mudou               = dplyr::case_when(
+      is.na(hash_ant) | is.na(r$sha256) ~ NA,
+      hash_ant == r$sha256               ~ FALSE,
+      TRUE                                ~ TRUE
+    ),
+    size_bytes          = r$size_bytes,
+    attempts_used       = r$attempts_used,
+    note                = r$note
+  )
+})
+
+manifest_path <- file.path(MANIFEST_DIR, paste0("download_log_", TS_EXECUCAO, ".csv"))
+readr::write_csv(manifest_df, manifest_path)
+
+n_mudaram <- sum(manifest_df$mudou, na.rm = TRUE)
+n_novos   <- sum(is.na(manifest_df$mudou))
+message("Arquivos com conteúdo alterado desde a última execução: ", n_mudaram)
+message("Arquivos novos: ", n_novos)
