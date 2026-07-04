@@ -106,7 +106,9 @@ safe_step("CFEM smart parsing (ANM arrecadacao)", {
     }
 
     df <- cfem_smart_read(
-      p, enc = "ISO-8859-1",
+      p, 
+      enc = "ISO-8859-1",
+      #enc = "UTF-8",
       decimal_score_cols = cfem_cols_valor[[nm]],
       log_dir = QA_DIR
     )
