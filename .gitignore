@@ -11,6 +11,6 @@ data/
 __pycache__/
 *.pyc
 .env
-R/
+R/old/
 .png
 .positai

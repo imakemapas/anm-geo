@@ -1895,6 +1895,385 @@ if (is.na(data_atualizacao)) data_atualizacao <- "Data não disponível"
 .read_rds <- function(name) readRDS(file.path(res_dir, name))
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
+# ==============================================================================
+# FUNCOES DO GRAFICO DE HISTORICO POR PROCESSO (Peca C)
+# ==============================================================================
+# EMBUTIDAS AQUI DE PROPOSITO (nao via source() de arquivo externo): o deploy
+# no droplet usa scp so para "app.R" e "*.rds" (ver comando de deploy do
+# usuario) — qualquer outro .R solto dentro de shiny_dashboard NAO sobe para
+# o servidor. Por isso este bloco nao pode depender de um source() externo.
+#
+# FONTE DA VERDADE / ONDE EDITAR: R/graficos_historico.R, no repositorio do
+# pipeline (o mesmo arquivo que utils.R usa via source()). Este bloco aqui e
+# uma COPIA MANUAL. Se alterar a logica do grafico em graficos_historico.R,
+# tem que colar a mudanca aqui tambem — nao ha jeito de automatizar isso sem
+# reintroduzir uma dependencia de arquivo externo no deploy. Isso e uma
+# excecao deliberada a regra de nao duplicar codigo, forcada pela restricao
+# real do scp, nao uma escolha de conveniencia.
+# ------------------------------------------------------------------------------
+
+formata_num_br <- function(x) {
+  format(x, big.mark = ".", decimal.mark = ",", scientific = FALSE, trim = TRUE)
+}
+
+tema_historico_processo <- ggplot2::theme_minimal(base_size = 11) +
+  ggplot2::theme(legend.position = "bottom", legend.title = ggplot2::element_blank())
+
+calcular_gaps_titulo <- function(inicio, fim, data_referencia = Sys.Date()) {
+  if (length(inicio) == 0) {
+    return(tibble::tibble(xmin = as.Date(character()), xmax = as.Date(character())))
+  }
+
+  ord <- order(inicio)
+  inicio <- inicio[ord]; fim <- fim[ord]
+
+  intervalos_ini <- c(); intervalos_fim <- c()
+  cur_ini <- inicio[1]; cur_fim <- fim[1]
+  if (length(inicio) > 1) {
+    for (i in 2:length(inicio)) {
+      if (inicio[i] <= cur_fim) {
+        cur_fim <- max(cur_fim, fim[i])
+      } else {
+        intervalos_ini <- c(intervalos_ini, cur_ini)
+        intervalos_fim <- c(intervalos_fim, cur_fim)
+        cur_ini <- inicio[i]; cur_fim <- fim[i]
+      }
+    }
+  }
+  intervalos_ini <- c(intervalos_ini, cur_ini)
+  intervalos_fim <- c(intervalos_fim, cur_fim)
+
+  gaps_ini <- c(); gaps_fim <- c()
+  if (length(intervalos_ini) > 1) {
+    for (i in 1:(length(intervalos_ini) - 1)) {
+      gaps_ini <- c(gaps_ini, intervalos_fim[i])
+      gaps_fim <- c(gaps_fim, intervalos_ini[i + 1])
+    }
+  }
+
+  ultimo_fim <- intervalos_fim[length(intervalos_fim)]
+  if (ultimo_fim < data_referencia) {
+    gaps_ini <- c(gaps_ini, ultimo_fim)
+    gaps_fim <- c(gaps_fim, data_referencia)
+  }
+
+  tibble::tibble(xmin = as.Date(gaps_ini, origin = "1970-01-01"),
+                 xmax = as.Date(gaps_fim, origin = "1970-01-01"))
+}
+
+gaps_vigencia_titulo <- function(situacao_documental, processos = NULL) {
+  d <- situacao_documental |>
+    dplyr::filter(!is.na(dt_publicacao), !is.na(dt_vencimento))
+  if (!is.null(processos)) d <- d |> dplyr::filter(processo %in% processos)
+  if (nrow(d) == 0) {
+    return(tibble::tibble(processo = character(), xmin = as.Date(character()), xmax = as.Date(character())))
+  }
+  d |>
+    dplyr::group_by(processo) |>
+    dplyr::group_modify(~ calcular_gaps_titulo(.x$dt_publicacao, .x$dt_vencimento)) |>
+    dplyr::ungroup()
+}
+
+# --- Reconstrucao completa de aptidao como intervalos (fase/status + licenca
+# + titulo) — usada na faixa vermelha do grafico. Ver graficos_historico.R
+# para os comentarios completos / fonte da verdade.
+unir_intervalos <- function(inicio, fim) {
+  if (length(inicio) == 0) {
+    return(tibble::tibble(xmin = as.Date(character()), xmax = as.Date(character())))
+  }
+  ord <- order(inicio)
+  inicio <- inicio[ord]; fim <- fim[ord]
+  ini_out <- c(); fim_out <- c()
+  cur_ini <- inicio[1]; cur_fim <- fim[1]
+  if (length(inicio) > 1) {
+    for (i in 2:length(inicio)) {
+      if (inicio[i] <= cur_fim) {
+        cur_fim <- max(cur_fim, fim[i])
+      } else {
+        ini_out <- c(ini_out, cur_ini); fim_out <- c(fim_out, cur_fim)
+        cur_ini <- inicio[i]; cur_fim <- fim[i]
+      }
+    }
+  }
+  ini_out <- c(ini_out, cur_ini); fim_out <- c(fim_out, cur_fim)
+  tibble::tibble(xmin = as.Date(ini_out, origin = "1970-01-01"),
+                 xmax = as.Date(fim_out, origin = "1970-01-01"))
+}
+
+complementar_intervalos <- function(intervalos, inicio_janela, fim_janela) {
+  if (is.null(intervalos) || nrow(intervalos) == 0) {
+    return(tibble::tibble(xmin = inicio_janela, xmax = fim_janela))
+  }
+  intervalos <- intervalos[order(intervalos$xmin), , drop = FALSE]
+  gaps_ini <- c(); gaps_fim <- c()
+  cursor <- inicio_janela
+  for (i in seq_len(nrow(intervalos))) {
+    if (intervalos$xmin[i] > cursor) {
+      gaps_ini <- c(gaps_ini, cursor); gaps_fim <- c(gaps_fim, intervalos$xmin[i] - 1)
+    }
+    cursor <- max(cursor, intervalos$xmax[i] + 1)
+  }
+  if (cursor <= fim_janela) {
+    gaps_ini <- c(gaps_ini, cursor); gaps_fim <- c(gaps_fim, fim_janela)
+  }
+  if (length(gaps_ini) == 0) {
+    return(tibble::tibble(xmin = as.Date(character()), xmax = as.Date(character())))
+  }
+  tibble::tibble(xmin = as.Date(gaps_ini, origin = "1970-01-01"),
+                 xmax = as.Date(gaps_fim, origin = "1970-01-01"))
+}
+
+segmentos_aptidao_processo <- function(processo_alvo, serie_fase_status, situacao_documental,
+                                        protocolos_licenca_ambiental, data_referencia = Sys.Date()) {
+  processo_alvo <- as.character(processo_alvo)[1]
+  FASES_QUE_OPERAM <- c("CONC LAV", "LICEN", "PLG", "REG EXT")
+
+  fs <- if (!is.null(serie_fase_status)) serie_fase_status[serie_fase_status$processo == processo_alvo, , drop = FALSE] else NULL
+  if (is.null(fs) || nrow(fs) == 0) return(NULL)
+
+  doc <- if (!is.null(situacao_documental)) situacao_documental[situacao_documental$processo == processo_alvo, , drop = FALSE] else NULL
+  lic <- if (!is.null(protocolos_licenca_ambiental)) protocolos_licenca_ambiental[protocolos_licenca_ambiental$processo == processo_alvo, , drop = FALSE] else NULL
+  dt_primeiro_protocolo_lic <- if (!is.null(lic) && nrow(lic) > 0) min(lic$dt_protocolo, na.rm = TRUE) else as.Date(NA)
+
+  intervalos_titulo <- if (!is.null(doc)) {
+    doc_v <- doc[!is.na(doc$dt_publicacao) & !is.na(doc$dt_vencimento), , drop = FALSE]
+    unir_intervalos(doc_v$dt_publicacao, doc_v$dt_vencimento)
+  } else {
+    tibble::tibble(xmin = as.Date(character()), xmax = as.Date(character()))
+  }
+
+  fs2 <- fs
+  fs2$dt_fim_efetivo <- dplyr::coalesce(fs2$dt_fim, data_referencia)
+
+  segmentos <- list()
+  for (i in seq_len(nrow(fs2))) {
+    ini <- fs2$dt_inicio[i]; fim <- fs2$dt_fim_efetivo[i]
+    if (is.na(ini) || is.na(fim) || fim < ini) next
+    fase_i <- fs2$fase[i]; status_i <- fs2$status[i]
+
+    if (is.na(fase_i) || !(fase_i %in% FASES_QUE_OPERAM)) {
+      segmentos[[length(segmentos) + 1]] <- tibble::tibble(
+        xmin = ini, xmax = fim, apto_na_data = "em_analise", motivo_nao_apto_na_data = "fase_de_tramitacao_ou_pesquisa")
+      next
+    }
+    if (status_i != "ATIVA") {
+      segmentos[[length(segmentos) + 1]] <- tibble::tibble(
+        xmin = ini, xmax = fim, apto_na_data = "FALSE", motivo_nao_apto_na_data = "suspensa_ou_encerrada")
+      next
+    }
+    if (is.na(dt_primeiro_protocolo_lic) || dt_primeiro_protocolo_lic >= ini) {
+      segmentos[[length(segmentos) + 1]] <- tibble::tibble(
+        xmin = ini, xmax = fim, apto_na_data = "FALSE", motivo_nao_apto_na_data = "sem_licenca_ambiental_previa")
+      next
+    }
+    if (nrow(intervalos_titulo) == 0) {
+      segmentos[[length(segmentos) + 1]] <- tibble::tibble(
+        xmin = ini, xmax = fim, apto_na_data = "FALSE", motivo_nao_apto_na_data = "vencimento_sem_data_a_revisar")
+      next
+    }
+    cobertura <- unir_intervalos(pmax(intervalos_titulo$xmin, ini), pmin(intervalos_titulo$xmax, fim))
+    cobertura <- cobertura[cobertura$xmin <= cobertura$xmax, , drop = FALSE]
+    if (nrow(cobertura) > 0) {
+      for (k in seq_len(nrow(cobertura))) {
+        segmentos[[length(segmentos) + 1]] <- tibble::tibble(
+          xmin = cobertura$xmin[k], xmax = cobertura$xmax[k], apto_na_data = "TRUE", motivo_nao_apto_na_data = NA_character_)
+      }
+    }
+    buracos <- complementar_intervalos(cobertura, ini, fim)
+    if (nrow(buracos) > 0) {
+      for (k in seq_len(nrow(buracos))) {
+        segmentos[[length(segmentos) + 1]] <- tibble::tibble(
+          xmin = buracos$xmin[k], xmax = buracos$xmax[k], apto_na_data = "FALSE", motivo_nao_apto_na_data = "titulo_vencido")
+      }
+    }
+  }
+
+  if (length(segmentos) == 0) return(NULL)
+  out <- dplyr::bind_rows(segmentos)
+  out$processo <- processo_alvo
+  out[order(out$xmin), c("processo", "xmin", "xmax", "apto_na_data", "motivo_nao_apto_na_data")]
+}
+
+periodos_nao_apto_processo <- function(processo_alvo, serie_fase_status, situacao_documental,
+                                        protocolos_licenca_ambiental, data_referencia = Sys.Date()) {
+  seg <- segmentos_aptidao_processo(processo_alvo, serie_fase_status, situacao_documental,
+                                     protocolos_licenca_ambiental, data_referencia)
+  if (is.null(seg)) return(NULL)
+  nao_apto <- seg[seg$apto_na_data != "TRUE", , drop = FALSE]
+  if (nrow(nao_apto) == 0) {
+    return(tibble::tibble(xmin = as.Date(character()), xmax = as.Date(character())))
+  }
+  unir_intervalos(nao_apto$xmin, nao_apto$xmax)
+}
+
+camada_marcacao <- function(dados, col_data, cor, col_label = NULL,
+                             label_italico = FALSE, mostrar_texto = TRUE) {
+  if (is.null(dados) || nrow(dados) == 0) return(list())
+
+  dados <- dados |>
+    dplyr::mutate(.label = if (!is.null(col_label))
+      paste0(.data[[col_label]], " ", format(.data[[col_data]], "%d/%m/%Y"))
+      else format(.data[[col_data]], "%d/%m/%Y"))
+
+  camadas <- list(
+    ggplot2::geom_vline(
+      data = dados, ggplot2::aes(xintercept = .data[[col_data]]),
+      color = cor, linetype = "dashed", linewidth = 0.4
+    )
+  )
+  if (mostrar_texto) {
+    camadas <- c(camadas, list(
+      ggplot2::geom_text(
+        data = dados, ggplot2::aes(x = .data[[col_data]], y = Inf, label = .label),
+        inherit.aes = FALSE, color = cor, size = 2,
+        fontface = if (label_italico) "italic" else "plain",
+        angle = 90, hjust = 1.1, vjust = -0.4
+      )
+    ))
+  }
+  camadas
+}
+
+eventos_marcacao <- function(eventos_classificados, papeis, processos = NULL) {
+  if (is.null(eventos_classificados)) return(NULL)
+  d <- eventos_classificados |> dplyr::filter(papel %in% papeis)
+  if (!is.null(processos)) d <- d |> dplyr::filter(processo %in% processos)
+  d
+}
+
+# -----------------------------------------------------------------------------
+# VERSAO PLOTLY NATIVA (nao ggplotly) — usada na aba 4 do Shiny. Mesmo padrao
+# do app.R original (plot_ly() direto + hovertemplate + shapes de layout),
+# por isso funciona bem: nunca passa pela conversao ggplot2->plotly que
+# quebrava a faixa vermelha e os labels. Eventos entram como tracinhos
+# coloridos na base (symbol "line-ns-open") com texto no HOVER.
+grafico_historico_processo_plotly <- function(processo_alvo,
+                                               dados_cfem = NULL,
+                                               situacao_documental = NULL,
+                                               protocolos_licenca_ambiental = NULL,
+                                               eventos_classificados = NULL,
+                                               serie_fase_status = NULL,
+                                               variavel = c("valor", "peso"),
+                                               cores_evento = list()) {
+
+  variavel <- match.arg(variavel)
+  processo_alvo <- as.character(processo_alvo)[1]
+
+  cores <- utils::modifyList(list(
+    linha = "#1B4332", ponto_ok = "#2D6A4F", ponto_alerta = "#C0392B",
+    publicacao = "#1B7A3D", vencimento = "#C0392B", protocolo = "#2C3E50",
+    suspensao  = "#B9770E", retomada = "#1F618D", anulacao = "#7B241C"
+  ), cores_evento)
+
+  col_y <- if (variavel == "valor") "VALORarr" else "PESO_KG_final"
+  eixo_y_titulo <- if (variavel == "valor") "R$" else "kg"
+
+  cfem_p <- NULL
+  if (!is.null(dados_cfem)) {
+    cfem_p <- dados_cfem |>
+      dplyr::mutate(PROCESSO = as.character(PROCESSO)) |>
+      dplyr::filter(PROCESSO == processo_alvo) |>
+      dplyr::mutate(data_cfem = if ("data_cfem" %in% names(dados_cfem)) data_cfem
+                                 else as.Date(sprintf("%04d-%02d-01", ANO, MES))) |>
+      dplyr::arrange(data_cfem)
+  }
+  tem_cfem <- !is.null(cfem_p) && nrow(cfem_p) > 0
+
+  doc_p <- if (!is.null(situacao_documental)) situacao_documental |> dplyr::filter(processo == processo_alvo) else NULL
+  lic_p <- if (!is.null(protocolos_licenca_ambiental)) protocolos_licenca_ambiental |> dplyr::filter(processo == processo_alvo) else NULL
+  ev_p  <- if (!is.null(eventos_classificados)) eventos_classificados |> dplyr::filter(processo == processo_alvo) else NULL
+
+  publicacao_p <- if (!is.null(doc_p)) doc_p |> dplyr::filter(!is.na(dt_publicacao)) |> dplyr::distinct(dt_publicacao, dssituacaodocumentolegal) else NULL
+  vencimento_p <- if (!is.null(doc_p)) doc_p |> dplyr::filter(!is.na(dt_vencimento)) |> dplyr::distinct(dt_vencimento, dssituacaodocumentolegal) else NULL
+
+  # CORRECAO (achado real, processo 850292/2016): a faixa vermelha nao pode
+  # olhar so vencimento NOMINAL do titulo — um titulo pode morrer ANTES do
+  # vencimento nominal por renuncia/cassacao/nulidade/revogacao (evento
+  # FECHA). periodos_nao_apto_processo() cruza fase/status + licenca +
+  # titulo, os mesmos 3 criterios ja aprovados, como intervalos.
+  gaps_p <- periodos_nao_apto_processo(processo_alvo, serie_fase_status, situacao_documental, protocolos_licenca_ambiental)
+
+  suspensao_p <- eventos_marcacao(ev_p, papeis = "SUSPENDE")
+  retomada_p  <- eventos_marcacao(ev_p, papeis = "RETOMA")
+  anulacao_p  <- eventos_marcacao(ev_p, papeis = "FECHA")
+
+  shapes <- list()
+  if (!is.null(gaps_p) && nrow(gaps_p) > 0) {
+    for (i in seq_len(nrow(gaps_p))) {
+      shapes[[length(shapes) + 1]] <- list(
+        type = "rect", xref = "x", yref = "paper",
+        x0 = as.character(gaps_p$xmin[i]), x1 = as.character(gaps_p$xmax[i]),
+        y0 = 0, y1 = 1, fillcolor = "rgba(192,57,43,0.12)", line = list(width = 0), layer = "below"
+      )
+    }
+  }
+
+  marcas <- list()
+  empilhar_marca <- function(datas, rotulos, cor) {
+    if (is.null(datas) || length(datas) == 0) return(invisible(NULL))
+    marcas[[length(marcas) + 1]] <<- data.frame(x = as.Date(datas), texto = rotulos, cor = cor, stringsAsFactors = FALSE)
+  }
+  if (!is.null(publicacao_p) && nrow(publicacao_p) > 0)
+    empilhar_marca(publicacao_p$dt_publicacao, paste0(publicacao_p$dssituacaodocumentolegal, " — ", format(publicacao_p$dt_publicacao, "%d/%m/%Y")), cores$publicacao)
+  if (!is.null(vencimento_p) && nrow(vencimento_p) > 0)
+    empilhar_marca(vencimento_p$dt_vencimento, paste0(vencimento_p$dssituacaodocumentolegal, " — ", format(vencimento_p$dt_vencimento, "%d/%m/%Y")), cores$vencimento)
+  if (!is.null(lic_p) && nrow(lic_p) > 0)
+    empilhar_marca(lic_p$dt_protocolo, paste0("Lic Amb Protoc — ", format(lic_p$dt_protocolo, "%d/%m/%Y")), cores$protocolo)
+  if (!is.null(suspensao_p) && nrow(suspensao_p) > 0)
+    empilhar_marca(suspensao_p$dtevento, paste0(suspensao_p$dsevento, " — ", format(suspensao_p$dtevento, "%d/%m/%Y")), cores$suspensao)
+  if (!is.null(retomada_p) && nrow(retomada_p) > 0)
+    empilhar_marca(retomada_p$dtevento, paste0(retomada_p$dsevento, " — ", format(retomada_p$dtevento, "%d/%m/%Y")), cores$retomada)
+  if (!is.null(anulacao_p) && nrow(anulacao_p) > 0)
+    empilhar_marca(anulacao_p$dtevento, paste0(anulacao_p$dsevento, " — ", format(anulacao_p$dtevento, "%d/%m/%Y")), cores$anulacao)
+  marcas_df <- if (length(marcas) > 0) dplyr::bind_rows(marcas) else NULL
+
+  if (tem_cfem) {
+    cor_ponto <- ifelse(!is.na(cfem_p$apto_na_data) & cfem_p$apto_na_data != "TRUE",
+                         cores$ponto_alerta, cores$ponto_ok)
+    p <- plotly::plot_ly(
+      cfem_p, x = ~data_cfem, y = stats::as.formula(paste0("~", col_y)),
+      type = "scatter", mode = "lines+markers",
+      line = list(color = cores$linha, width = 2),
+      marker = list(color = cor_ponto, size = 7),
+      hovertemplate = paste0("%{x|%d/%m/%Y}<br>",
+                             if (variavel == "valor") "R$ %{y:,.2f}" else "%{y:,.2f} kg",
+                             "<extra></extra>"),
+      name = ""
+    )
+  } else {
+    datas_disponiveis <- c(
+      if (!is.null(publicacao_p)) publicacao_p$dt_publicacao,
+      if (!is.null(vencimento_p)) vencimento_p$dt_vencimento,
+      if (!is.null(lic_p))        lic_p$dt_protocolo,
+      if (!is.null(ev_p))         ev_p$dtevento
+    )
+    datas_disponiveis <- as.Date(datas_disponiveis, origin = "1970-01-01")
+    if (length(datas_disponiveis) == 0) datas_disponiveis <- c(Sys.Date() - 3650, Sys.Date())
+    p <- plotly::plot_ly(
+      x = c(min(datas_disponiveis), max(datas_disponiveis)), y = c(0, 0),
+      type = "scatter", mode = "markers", opacity = 0, hoverinfo = "none", showlegend = FALSE
+    )
+  }
+
+  if (!is.null(marcas_df) && nrow(marcas_df) > 0) {
+    p <- p |> plotly::add_markers(
+      data = marcas_df, x = ~x, y = 0, inherit = FALSE, showlegend = FALSE,
+      marker = list(color = marcas_df$cor, size = 10, symbol = "line-ns-open", line = list(width = 2)),
+      text = ~texto, hovertemplate = "%{text}<extra></extra>"
+    )
+  }
+
+  p |> plotly::layout(
+    shapes = shapes,
+    xaxis = list(title = ""), yaxis = list(title = eixo_y_titulo),
+    margin = list(l = 60, r = 20, t = 10, b = 30),
+    showlegend = FALSE
+  )
+}
+# ------------------------------------------------------------------------------
+# FIM DO BLOCO EMBUTIDO (Peca C)
+# ==============================================================================
+
 # ---- Dados tabulares ----
 cfem        <- .read_rds("cfem.rds")
 cfem_anual  <- .read_rds("cfem_anual.rds")
@@ -1960,28 +2339,30 @@ micro_propsolo      <- .read_rds_opt("micro_propsolo.rds")
 micro_ok            <- !is.null(micro_processos)
 micro_proc_choices  <- if (micro_ok) sort(unique(micro_processos$processo)) else character(0)
 
-# ---- Processos inaptos para CFEM ----
-cfem_inapto          <- .read_rds_opt("cfem_inapto_shiny.rds")
-cfem_inapto_serie    <- .read_rds_opt("cfem_inapto_serie_shiny.rds")
-cfem_inapto_janelas  <- .read_rds_opt("cfem_inapto_janelas_shiny.rds")
-cfem_inapto_historico <- .read_rds_opt("cfem_inapto_historico_shiny.rds")
-cfem_motivo_ref      <- .read_rds_opt("cfem_motivo_ref.rds")
-cfem_eventos_ref     <- .read_rds_opt("cfem_eventos_ref.rds")
-inapto_ok       <- !is.null(cfem_inapto)
-inapto_ufs      <- if (inapto_ok && "abbrev_state" %in% names(cfem_inapto))
-  sort(unique(na.omit(cfem_inapto$abbrev_state))) else character(0)
-inapto_muns     <- if (inapto_ok && "name_muni" %in% names(cfem_inapto))
-  sort(unique(na.omit(cfem_inapto$name_muni))) else character(0)
-inapto_fases    <- if (inapto_ok && "FASE" %in% names(cfem_inapto))
-  sort(unique(na.omit(cfem_inapto$FASE))) else character(0)
-inapto_cats     <- if (inapto_ok && "rotulo_principal" %in% names(cfem_inapto))
-  sort(unique(na.omit(cfem_inapto$rotulo_principal))) else character(0)
-inapto_subs     <- if (inapto_ok && "substancias" %in% names(cfem_inapto))
-  sort(unique(unlist(strsplit(na.omit(cfem_inapto$substancias), "; ")))) else character(0)
-inapto_map_mun  <- if (inapto_ok)
-  cfem_inapto |> dplyr::distinct(abbrev_state, name_muni) else data.frame()
-cp_ano_min <- if (inapto_ok && "dt_inicio_suspeicao" %in% names(cfem_inapto))
-  min(as.integer(format(cfem_inapto$dt_inicio_suspeicao, "%Y")), na.rm = TRUE) else 2000L
+# ---- Dossie da aba 4 (07_proc_shiny_dossie.R) — granularidade individual,
+# sem agregacao: 1 declaracao de CFEM = 1 linha, 1 evento = 1 linha ----
+dossie_resumo_processo      <- .read_rds_opt("dossie_resumo_processo.rds")
+cfem_declaracoes_dossie     <- .read_rds_opt("cfem_declaracoes_dossie.rds")
+cfem_motivo_ref             <- .read_rds_opt("cfem_motivo_ref.rds")
+cfem_eventos_ref            <- .read_rds_opt("cfem_eventos_ref.rds")
+
+# ---- Fontes do grafico historico por processo (08_proc_shiny_geo.R e
+# 07_proc_shiny_dossie.R ja deixam tudo em .rds dentro de shiny_dashboard;
+# nao ha dependencia de arrow/parquet em producao) ----
+situacao_documental          <- .read_rds_opt("situacao_documental.rds")
+protocolos_licenca_ambiental <- .read_rds_opt("protocolos_licenca_ambiental.rds")
+eventos_classificados        <- .read_rds_opt("eventos_classificados.rds")
+situacao_atual               <- .read_rds_opt("situacao_atual.rds")
+serie_fase_status            <- .read_rds_opt("serie_fase_status.rds")
+
+dossie_ok  <- !is.null(dossie_resumo_processo)
+inapto_ok  <- dossie_ok  # nome mantido por compatibilidade com o resto do server abaixo
+
+inapto_cats <- if (!is.null(cfem_motivo_ref)) sort(unique(na.omit(cfem_motivo_ref$rotulo))) else character(0)
+
+cp_ano_min <- if (dossie_ok && "dt_primeira_declaracao" %in% names(dossie_resumo_processo))
+  suppressWarnings(min(as.integer(format(dossie_resumo_processo$dt_primeira_declaracao, "%Y")), na.rm = TRUE)) else 2000L
+if (!is.finite(cp_ano_min)) cp_ano_min <- 2000L
 cp_ano_max <- as.integer(format(Sys.Date(), "%Y"))
 
 # ---- Colunas + rótulos (aba Tabela) ----
@@ -2386,7 +2767,7 @@ ui <- page_navbar(
             condition = "input.cp_modo == 'inaptos'",
             pickerInput("cp_categoria", "Tipo de alerta:",
                       choices = inapto_cats, selected = inapto_cats, multiple = TRUE, options = picker_opts),
-            sliderInput("cp_ano", "Período suspeito (ano início):",
+            sliderInput("cp_ano", "Ano da ultima declaracao de CFEM:",
                       min = cp_ano_min, max = cp_ano_max, value = c(cp_ano_min, cp_ano_max), step = 1, sep = "", ticks = FALSE)
           ),
           tags$hr(),
@@ -2510,22 +2891,32 @@ server <- function(input, output, session) {
     procs_filtrados <- pma_f$PROCESSO
 
     if (identical(input$cp_modo, "inaptos")) {
-      req(inapto_ok)
-      df <- cfem_inapto[cfem_inapto$processo %in% procs_filtrados, , drop = FALSE]
-      if (!is.null(input$cp_categoria) && length(input$cp_categoria) > 0)
-        df <- df[df$rotulo_principal %in% input$cp_categoria, , drop = FALSE]
-      if (!is.null(input$cp_ano) && "dt_inicio_suspeicao" %in% names(df)) {
-        anos <- as.integer(format(df$dt_inicio_suspeicao, "%Y"))
-        df <- df[!is.na(anos) & anos >= input$cp_ano[1] & anos <= input$cp_ano[2], , drop = FALSE]
+      req(dossie_ok)
+      df <- dossie_resumo_processo[dossie_resumo_processo$processo %in% procs_filtrados, , drop = FALSE]
+      # CORRECAO: "suspeito" NAO e mais "esta nao-apto hoje" (situacao_atual e
+      # uma foto do presente). Agora e "declarou CFEM em pelo menos 1 periodo
+      # em que NAO era apto" (tem_declaracao_periodo_nao_apto, reconstruido no
+      # 07 declaracao a declaracao) — evita incluir processo cujo CFEM todo
+      # foi feito num periodo em que ele era apto, so ficando nao-apto depois
+      # (achado real: processo 850016/2016).
+      df <- df[!is.na(df$tem_declaracao_periodo_nao_apto) & df$tem_declaracao_periodo_nao_apto, , drop = FALSE]
+      if (!is.null(input$cp_categoria) && length(input$cp_categoria) > 0 && !is.null(cfem_motivo_ref)) {
+        motivos_sel <- cfem_motivo_ref$motivo[cfem_motivo_ref$rotulo %in% input$cp_categoria]
+        tem_motivo_sel <- vapply(strsplit(df$motivos_periodo_nao_apto, "; ", fixed = TRUE), function(m) any(m %in% motivos_sel), logical(1))
+        df <- df[tem_motivo_sel, , drop = FALSE]
+      }
+      if (!is.null(input$cp_ano) && "dt_ultima_declaracao" %in% names(df)) {
+        anos <- as.integer(format(df$dt_ultima_declaracao, "%Y"))
+        df <- df[is.na(anos) | (anos >= input$cp_ano[1] & anos <= input$cp_ano[2]), , drop = FALSE]
       }
       termo <- trimws(input$cp_busca %||% "")
       if (nchar(termo) > 0) {
-        cols <- intersect(c("processo", "TITULAR"), names(df))
+        cols <- intersect(c("processo", "titular"), names(df))
         chave <- do.call(paste, c(lapply(df[cols], as.character), sep = " | "))
         df <- df[grepl(tolower(termo), tolower(chave), fixed = TRUE), , drop = FALSE]
       }
-      cols <- intersect(c("processo", "abbrev_state", "FASE", "rotulo_principal",
-                           "VALORarr_total", "PESO_KG_final_total", "n_meses_suspeitos"), names(df))
+      cols <- intersect(c("processo", "uf", "motivos_periodo_nao_apto", "apto_operar",
+                           "valor_total", "peso_total_kg", "n_declaracoes_periodo_nao_apto"), names(df))
       df[, cols, drop = FALSE]
     } else {
       termo <- trimws(input$cp_busca %||% "")
@@ -2551,27 +2942,27 @@ server <- function(input, output, session) {
 
   output$cp_info <- renderUI({
     if (!micro_ok) return(tags$div(style = "font-size:12px;color:#b02a37;",
-      "Microdados não encontrados (rode o script 06)."))
+      "Microdados não encontrados (rode o script 07)."))
     df <- cp_lista_df()
     if (is.null(df)) return(tags$div(style = "font-size:12px;color:#6c757d;",
       "Digite um processo ou titular para listar."))
-    
-    n   <- nrow(df)
-    
-    val <- if ("VALORarr_total" %in% names(df))
-      paste0("R$ ", format(round(sum(df$VALORarr_total, na.rm = TRUE), 2),
+
+    n <- nrow(df)
+
+    val <- if ("valor_total" %in% names(df))
+      paste0("R$ ", format(round(sum(df$valor_total, na.rm = TRUE), 2),
                               big.mark = ".", decimal.mark = ",", nsmall = 2)) else ""
-    
-    kg_tot <- if ("PESO_KG_final_total" %in% names(df))
-      sum(df$PESO_KG_final_total, na.rm = TRUE) else NA_real_
-    
+
+    kg_tot <- if ("peso_total_kg" %in% names(df))
+      sum(df$peso_total_kg, na.rm = TRUE) else NA_real_
+
     kg_str <- if (!is.na(kg_tot))
       paste0(format(round(kg_tot, 2), big.mark=".", decimal.mark=",", nsmall=2), " kg") else ""
-      
+
     tags$div(style = "font-size:12px; color:#2C3E50; line-height:1.8;",
       tags$div(tags$strong("Processos: "), format(n, big.mark=".", decimal.mark=",")),
-      if (nchar(val) > 0) tags$div(tags$strong("Valor suspeito: "), val) else NULL,
-      if (nchar(kg_str) > 0) tags$div(tags$strong("Peso suspeito: "), kg_str) else NULL
+      if (nchar(val) > 0) tags$div(tags$strong("Valor CFEM (na selecao): "), val) else NULL,
+      if (nchar(kg_str) > 0) tags$div(tags$strong("Peso (na selecao): "), kg_str) else NULL
     )
   })
 
@@ -2580,19 +2971,41 @@ server <- function(input, output, session) {
     df <- cp_lista_df()
     validate(need(!is.null(df), "Use a busca ou os filtros para listar processos."))
     validate(need(nrow(df) > 0, "Nenhum processo encontrado."))
+
+    # Traduz codigos de apto_operar/motivos_periodo_nao_apto para rotulo
+    # amigavel antes de exibir (o dado por baixo continua sendo o codigo
+    # original). apto_operar aqui e so CONTEXTO ("hoje"); o motivo real de
+    # estar na lista e motivos_periodo_nao_apto (historico, declaracao a
+    # declaracao) — ver cp_lista_df().
+    if ("apto_operar" %in% names(df)) {
+      df$apto_operar <- dplyr::case_when(
+        df$apto_operar == "TRUE"  ~ "Apto",
+        df$apto_operar == "FALSE" ~ "Nao apto",
+        df$apto_operar == "em_analise" ~ "Em analise",
+        TRUE ~ df$apto_operar
+      )
+    }
+    if ("motivos_periodo_nao_apto" %in% names(df) && !is.null(cfem_motivo_ref)) {
+      map_motivo <- setNames(cfem_motivo_ref$rotulo, cfem_motivo_ref$motivo)
+      df$motivos_periodo_nao_apto <- vapply(strsplit(df$motivos_periodo_nao_apto, "; ", fixed = TRUE), function(m) {
+        if (length(m) == 0 || all(m == "")) return("")
+        paste(dplyr::coalesce(unname(map_motivo[m]), m), collapse = "; ")
+      }, character(1))
+    }
+
     nm <- names(df); cn <- nm
-    cn[nm == "processo"]            <- "Processo"
-    cn[nm == "abbrev_state"]        <- "UF"
-    cn[nm == "FASE"]                <- "Fase"
-    cn[nm == "rotulo_principal"]    <- "Alerta principal"
-    cn[nm == "VALORarr_total"]      <- "Valor suspeito (R$)"
-    cn[nm == "PESO_KG_final_total"] <- "Peso final (kg)"
-    cn[nm == "n_meses_suspeitos"]   <- "Meses suspeitos"
-    cn[nm == "municipios"]          <- "Município"
-    # Formata VALORarr_total como R$ se presente
-    if ("VALORarr_total" %in% names(df))
-      df$VALORarr_total <- paste0("R$ ", format(round(df$VALORarr_total, 2),
-                                                 big.mark = ".", decimal.mark = ",", nsmall = 2))
+    cn[nm == "processo"]                      <- "Processo"
+    cn[nm == "uf"]                            <- "UF"
+    cn[nm == "fase"]                          <- "Fase"
+    cn[nm == "apto_operar"]                   <- "Situacao hoje"
+    cn[nm == "motivos_periodo_nao_apto"]      <- "Motivo(s) no periodo declarado"
+    cn[nm == "valor_total"]                   <- "Valor CFEM (R$)"
+    cn[nm == "peso_total_kg"]                 <- "Peso final (kg)"
+    cn[nm == "n_declaracoes_periodo_nao_apto"]<- "Declaracoes em periodo nao apto"
+    cn[nm == "municipios"]                     <- "Município"
+    if ("valor_total" %in% names(df))
+      df$valor_total <- paste0("R$ ", format(round(df$valor_total, 2),
+                                              big.mark = ".", decimal.mark = ",", nsmall = 2))
     DT::datatable(df, rownames = FALSE, class = "compact", colnames = cn,
       selection = "single", extensions = "Scroller",
       options = list(scrollX = TRUE, dom = "tip", pageLength = 12, deferRender = TRUE,
@@ -2608,22 +3021,19 @@ server <- function(input, output, session) {
   })
 
   # ---- Legenda de categorias (sempre visível) ----
-  # ---- Legenda de categorias (sempre visível) ----
-  # ---- Legenda de categorias (sempre visível) ----
   output$cp_legenda_categorias <- renderUI({
     if (is.null(cfem_motivo_ref)) return(NULL)
     cores <- c(
-      sem_lic_amb       = "#8E44AD", # NOSSA CATEGORIA NOVA AQUI (Roxo)
-      extr_fase_nao_aut = "#F9A825",
-      pesq_sem_gu       = "#D35400", 
-      proc_encerrado    = "#A32D2D",
-      proc_suspenso     = "#856404",
-      extr_sem_vigencia = "#6C757D"
+      fase_de_tramitacao_ou_pesquisa = "#6C757D",
+      suspensa_ou_encerrada          = "#A32D2D",
+      sem_licenca_ambiental_previa   = "#8E44AD",
+      titulo_vencido                 = "#856404",
+      vencimento_sem_data_a_revisar  = "#F9A825"
     )
     itens <- lapply(seq_len(nrow(cfem_motivo_ref)), function(i) {
       r <- cfem_motivo_ref[i, ]
-      motivo_str <- as.character(r$motivo) 
-      cor <- cores[[motivo_str]] %||% "#6C757D"
+      motivo_str <- as.character(r$motivo)
+      cor <- if (!is.na(motivo_str) && motivo_str %in% names(cores)) cores[[motivo_str]] else "#6C757D"
       tags$div(style = "margin-bottom:6px; font-size:11px; line-height:1.3;",
         tags$span(style = paste0("display:inline-block; width:10px; height:10px; border-radius:2px; background:",
                                  cor, "; margin-right:6px;")),
@@ -2641,12 +3051,12 @@ server <- function(input, output, session) {
     if (is.null(cfem_eventos_ref)) return(tags$em("Tabela não disponível."))
     df <- cfem_eventos_ref
 
-    papel_cor <- c(ABRE = "#D4EDDA", FECHA = "#F8D7DA", SUSPENDE = "#FFF3CD", RETOMA = "#D1ECF1")
-    papel_tx  <- c(ABRE = "#1E7E34", FECHA = "#C0392B", SUSPENDE = "#8A6D00", RETOMA = "#0C7C8C")
+    papel_cor <- c(MUDA_FASE = "#D4EDDA", FECHA = "#F8D7DA", SUSPENDE = "#FFF3CD", RETOMA = "#D1ECF1")
+    papel_tx  <- c(MUDA_FASE = "#1E7E34", FECHA = "#C0392B", SUSPENDE = "#8A6D00", RETOMA = "#0C7C8C")
 
     badge <- function(papel) {
-      cor <- papel_cor[[papel]] %||% "#EEE"
-      tx  <- papel_tx[[papel]]  %||% "#333"
+      cor <- if (!is.na(papel) && papel %in% names(papel_cor)) papel_cor[[papel]] else "#EEE"
+      tx  <- if (!is.na(papel) && papel %in% names(papel_tx))  papel_tx[[papel]]  else "#333"
       tags$span(papel, style = paste0(
         "display:inline-block; padding:1px 8px; border-radius:10px; font-size:10px;",
         "font-weight:600; background:", cor, "; color:", tx, ";"))
@@ -2674,657 +3084,277 @@ server <- function(input, output, session) {
     tags$div(style = "max-height:480px; overflow-y:auto; padding-right:6px;", blocos)
   })
 
+  # ---- Caixa de status do processo (dossie) — apto_operar/motivo_nao_apto,
+  # direto do situacao_atual/dossie_resumo_processo, sem reclassificar nada ----
   output$cp_dossie_box <- renderUI({
-    p <- cp_proc_sel(); if (is.null(p) || !inapto_ok) return(NULL)
-    row <- cfem_inapto[cfem_inapto$processo == p, , drop = FALSE]
+    p <- cp_proc_sel(); if (is.null(p) || !dossie_ok) return(NULL)
+    row <- dossie_resumo_processo[dossie_resumo_processo$processo == p, , drop = FALSE]
     if (nrow(row) == 0) return(NULL)
     row <- row[1, ]
-    cod <- row$motivo_principal    %||% "extr_sem_vigencia"
-    rot <- row$rotulo_principal    %||% "Fora da vigência"
-    
-    cor_cfg <- if (cod == "proc_encerrado") {
-      list(bg="#FCEBEB", bd="#A32D2D", tx="#501313")
-    } else if (cod == "proc_suspenso") {
-      list(bg="#FFF3CD", bd="#856404", tx="#412402")
-    } else if (cod == "sem_lic_amb") {
-      list(bg="#F4ECF7", bd="#8E44AD", tx="#4A235A") # NOSSA CAIXA ROXA AQUI
-    } else if (cod == "extr_fase_nao_aut") {
-      list(bg="#FFF8E1", bd="#F9A825", tx="#3E2723")
-    } else if (cod == "pesq_sem_gu") {
-      list(bg="#FBEFE3", bd="#D35400", tx="#5C2500") 
+
+    cod <- row$motivo_nao_apto %||% NA_character_
+    ref_row <- if (!is.null(cfem_motivo_ref) && !is.na(cod))
+      cfem_motivo_ref[cfem_motivo_ref$motivo == cod, , drop = FALSE] else NULL
+    rot <- if (!is.null(ref_row) && nrow(ref_row) > 0) ref_row$rotulo[1] else
+      if (identical(row$apto_operar, "TRUE")) "Apto" else "Situacao a revisar"
+    desc <- if (!is.null(ref_row) && nrow(ref_row) > 0) ref_row$descricao[1] else NULL
+
+    cor_cfg <- if (identical(row$apto_operar, "TRUE")) {
+      list(bg = "#EAF6EC", bd = "#2D6A4F", tx = "#1B4332")
+    } else if (identical(cod, "suspensa_ou_encerrada")) {
+      list(bg = "#FCEBEB", bd = "#A32D2D", tx = "#501313")
+    } else if (identical(cod, "sem_licenca_ambiental_previa")) {
+      list(bg = "#F4ECF7", bd = "#8E44AD", tx = "#4A235A")
+    } else if (identical(cod, "titulo_vencido") || identical(cod, "vencimento_sem_data_a_revisar")) {
+      list(bg = "#FFF3CD", bd = "#856404", tx = "#412402")
+    } else if (identical(cod, "fase_de_tramitacao_ou_pesquisa")) {
+      list(bg = "#E2E3E5", bd = "#6C757D", tx = "#2C2C2C")
     } else {
-      list(bg="#F0F0F0", bd="#6C757D", tx="#2C2C2C")
+      list(bg = "#F0F0F0", bd = "#6C757D", tx = "#2C2C2C")
     }
-    
+
     linha <- function(rotulo, val) if (!is.null(val) && length(val) && !is.na(val) && val != "")
       tags$div(tags$strong(paste0(rotulo, ": ")), val) else NULL
     fmt_rs <- function(x) if (length(x) && !is.na(x))
-      paste0("R$ ", format(round(x, 2), big.mark=".", decimal.mark=",", nsmall=2)) else NA
+      paste0("R$ ", format(round(x, 2), big.mark = ".", decimal.mark = ",", nsmall = 2)) else NA
     fmt_kg <- function(x) if (length(x) && !is.na(x))
-      paste0(format(round(x, 2), big.mark=".", decimal.mark=",", nsmall=2), " kg") else NA
+      paste0(format(round(x, 2), big.mark = ".", decimal.mark = ",", nsmall = 2), " kg") else NA
 
-    # Totais do processo (suspeito + legítimo) — via reactive já filtrado
-    s_raw <- cp_serie_p_raw()
-    val_total_proc  <- if (!is.null(s_raw)) sum(s_raw$VALORarr,      na.rm = TRUE) else NA_real_
-    peso_total_proc <- if (!is.null(s_raw)) sum(s_raw$PESO_KG_final, na.rm = TRUE) else NA_real_
-    val_susp  <- row$VALORarr_total
-    peso_susp <- row$PESO_KG_final_total
-    pct_val <- if (!is.na(val_susp) && !is.na(val_total_proc) && val_total_proc > 0)
-      paste0(" (", round(100 * val_susp / val_total_proc, 1), "%)") else ""
-    pct_peso <- if (!is.na(peso_susp) && !is.na(peso_total_proc) && peso_total_proc > 0)
-      paste0(" (", round(100 * peso_susp / peso_total_proc, 1), "%)") else ""
+    # Sobreposicao territorial (TI/UC/quilombola) — vem de pma_simpl (SIGMINE),
+    # NAO das flags de embargo (emb_MTa/emb_MTb/emb_IB/emb_IC): por decisao
+    # explicita, embargo/suspensao aqui na aba 4 entram via EVENTO (no grafico
+    # abaixo), nao via overlap espacial estatico.
+    pma_row <- tryCatch({
+      pa <- sf::st_drop_geometry(pma_simpl)
+      pa[as.character(pa$PROCESSO) == p, , drop = FALSE]
+    }, error = function(e) data.frame())
+    sobrep_ti  <- nrow(pma_row) > 0 && "TIov10km"   %in% names(pma_row) && isTRUE(as.logical(pma_row$TIov10km[1]))
+    sobrep_uc  <- nrow(pma_row) > 0 && "UCov2_10km" %in% names(pma_row) && isTRUE(as.logical(pma_row$UCov2_10km[1]))
+    sobrep_qui <- nrow(pma_row) > 0 && "QUIov"      %in% names(pma_row) && isTRUE(as.logical(pma_row$QUIov[1]))
 
     tags$div(
       style = paste0("background:", cor_cfg$bg, "; border-left:5px solid ", cor_cfg$bd,
                      "; color:", cor_cfg$tx, "; padding:12px 16px; border-radius:6px; margin-bottom:14px;"),
       tags$div(style = "font-weight:600; margin-bottom:2px; text-transform:uppercase;", rot),
       tags$div(style = "font-size:12px; margin-bottom:6px; opacity:0.8;", p),
-      if (!is.null(cfem_motivo_ref)) {
-        desc <- cfem_motivo_ref$descricao[cfem_motivo_ref$motivo == cod]
-        if (length(desc) > 0 && !is.na(desc))
-          tags$div(style = "font-size:12px; margin-bottom:8px; font-style:italic;", desc)
-      },
-      linha("Fase atual", row$FASE),
-      linha("Período suspeito",
-            paste0(format(row$dt_inicio_suspeicao, "%m/%Y"), " a ", format(row$dt_fim_suspeicao, "%m/%Y"),
-                   " (", row$n_meses_suspeitos, " meses)")),
-      linha("Valor CFEM recolhido",
-            paste0(fmt_rs(val_total_proc), " total | ", fmt_rs(val_susp), " suspeito", pct_val)),
-      linha("Peso recolhido",
-            paste0(fmt_kg(peso_total_proc), " total | ", fmt_kg(peso_susp), " suspeito", pct_peso)),
-      linha("Titular", row$TITULAR),
-      # Flags independentes
-      # Flags independentes validadas com segurança
-      if (isTRUE(row$lic_ambiental_nao_protoc))
+      if (!is.null(desc)) tags$div(style = "font-size:12px; margin-bottom:8px; font-style:italic;", desc),
+      linha("Fase (evento ANM)", row$fase_evento),
+      linha("Fase (PMA/SIGMINE)", row$fase_pma),
+      if (isTRUE(row$fase_diverge_pma))
+        tags$div(style = "font-size:11px; color:#721C24;",
+                 "Fase do historico de eventos diverge da fase registrada no PMA/SIGMINE"),
+      linha("Declaracoes de CFEM", paste0(row$n_declaracoes, " total | ", row$n_declaracoes_fora_vig, " fora de vigencia de titulo")),
+      linha("Valor arrecadado", fmt_rs(row$valor_total)),
+      linha("Peso comercializado", fmt_kg(row$peso_total_kg)),
+      linha("Titular", row$titular),
+      if (isTRUE(row$tem_evento_suspensao))
         tags$div(style = "margin-top:6px; font-size:11px; color:#721C24;",
-                 "Sem licença ambiental protocolada no período"),
-      if (isTRUE(row$extr_aut_pesq_sem_gu))
+                 "Ha pelo menos 1 evento de suspensao no historico administrativo"),
+      if (isTRUE(row$tem_evento_anulacao))
         tags$div(style = "font-size:11px; color:#721C24;",
-                 "Em AUT PESQ sem Guia de Utilização ativa no período"),
-      if (isTRUE(row$sobrep_ti))
-        tags$div(style = "font-size:11px; color:#721C24;",
-                 "Sobrepõe terra indígena (10 km)"),
-      if (isTRUE(row$sobrep_uc))
-        tags$div(style = "font-size:11px; color:#721C24;",
-                 "Sobrepõe unidade de conservação (10 km)"),
-      if (isTRUE(row$sobrep_qui))
-        tags$div(style = "font-size:11px; color:#721C24;",
-                 "Sobrepõe território quilombola")
+                 "Ha pelo menos 1 evento de anulacao/encerramento no historico administrativo"),
+      if (sobrep_ti)  tags$div(style = "font-size:11px; color:#721C24;", "Sobrepoe terra indigena (10 km)"),
+      if (sobrep_uc)  tags$div(style = "font-size:11px; color:#721C24;", "Sobrepoe unidade de conservacao (10 km)"),
+      if (sobrep_qui) tags$div(style = "font-size:11px; color:#721C24;", "Sobrepoe territorio quilombola")
     )
   })
 
-  # ---- Gráficos da trajetória CFEM do processo (R$ e kg) ----
-  output$cp_grafico_ui <- renderUI({
-    p <- cp_proc_sel()
-    if (is.null(p) || is.null(cfem_inapto_serie)) return(NULL)
-    if (!p %in% cfem_inapto_serie$processo) return(NULL)
-    tags$div(
-      style = "margin-bottom:14px;",
-      tags$div(style = "font-weight:600; margin-bottom:6px; color:#2C3E50;",
-               "Trajetória de declarações CFEM — período inapto sombreado"),
-      plotlyOutput("cp_grafico_valor", height = "240px"),
-      div(style = "height:8px;"),
-      plotlyOutput("cp_grafico_peso", height = "240px"),
-      div(style = "height:8px;"),
-      tags$div(style = "font-weight:600; margin-top:10px; margin-bottom:4px; color:#2C3E50;",
-               "Histórico de autorizações (fases do processo)"),
-      DTOutput("cp_tabela_fases", height = "auto") # <--- AGORA É UMA TABELA
-    )
-  })
-
-  # Constrói as bandas (shapes) das janelas de inaptidão para sombrear
-  # Constrói as bandas (shapes) das janelas de inaptidão para sombrear
-  cp_shapes_inapto <- function(p) {
-    if (is.null(cfem_inapto_janelas)) return(list())
-    jp <- cfem_inapto_janelas[cfem_inapto_janelas$processo == p, , drop = FALSE]
-    if (nrow(jp) == 0) return(list())
-    
-    shapes <- list()
-    serie_p <- cfem_inapto_serie[cfem_inapto_serie$processo == p, , drop = FALSE]
-    susp <- serie_p[serie_p$suspeita %in% TRUE, , drop = FALSE]
-    if (nrow(susp) == 0) return(list())
-    
-    # Agrupa meses suspeitos consecutivos em bandas
-    susp <- susp[order(susp$data_cfem), , drop = FALSE]
-    datas <- susp$data_cfem
-    grp <- cumsum(c(TRUE, diff(as.integer(format(datas, "%Y")) * 12 +
-                                 as.integer(format(datas, "%m"))) > 1))
-    
-    for (g in unique(grp)) {
-      bloco <- datas[grp == g]
-      
-      # [CORREÇÃO DO BUG INVISÍVEL] 
-      # Adicionamos ~31 dias ao limite final. Assim, se o bloco tiver apenas 1 mês isolado 
-      # (ex: x0 = 01/05/2020 e x1 = 01/05/2020), o retângulo passa a ir até o final do mês, 
-      # ganhando largura e aparecendo na tela!
-      x0 <- min(bloco)
-      x1 <- max(bloco) + 31 
-      
-      shapes[[length(shapes) + 1]] <- list(
-        type = "rect", xref = "x", yref = "paper",
-        x0 = as.character(x0), x1 = as.character(x1), y0 = 0, y1 = 1,
-        fillcolor = "rgba(192,57,43,0.12)", line = list(width = 0), layer = "below"
-      )
-    }
-    shapes
-  }
-
-  # Dados do processo selecionado — filtrados uma vez, reutilizados por todos os outputs
-  cp_serie_p_raw <- reactive({
-    p <- cp_proc_sel()
-    if (is.null(p) || is.null(cfem_inapto_serie)) return(NULL)
-    s <- cfem_inapto_serie[cfem_inapto_serie$processo == p, , drop = FALSE]
-    if (nrow(s) == 0) return(NULL)
-    s
-  })
-
-  # cp_historico_p <- reactive({
-  #   p <- cp_proc_sel()
-  #   if (is.null(p) || is.null(cfem_inapto_historico)) return(NULL)
-  #   h <- cfem_inapto_historico[cfem_inapto_historico$processo == p, , drop = FALSE]
-  #   if (nrow(h) == 0) return(NULL)
-    
-  #   # [NOVO] Auditoria de Vencimento de Títulos (Mata as fases "zumbi")
-  #   # Cruza com a tabela de títulos para ver se o prazo legal já expirou
-  #   if (exists("micro_titulos") && !is.null(micro_titulos)) {
-  #     df_tits <- micro_titulos[micro_titulos$processo == p, , drop = FALSE]
-  #     if (nrow(df_tits) > 0 && "dt_vencimento" %in% names(df_tits)) {
-        
-  #       # Pega a maior data de vencimento registrada para o processo
-  #       max_venc <- suppressWarnings(max(as.Date(df_tits$dt_vencimento), na.rm = TRUE))
-        
-  #       if (is.finite(max_venc) && max_venc < Sys.Date()) {
-  #         h <- h |>
-  #           dplyr::mutate(
-  #             # Aplica apenas se a janela estiver "Atual" (is.na(dt_fim)), for "ATIVA", 
-  #             # e o vencimento for igual ou posterior ao início da janela
-  #             aplicar = is.na(dt_fim) & status == "ATIVA" & (!is.na(dt_inicio) & max_venc >= dt_inicio),
-              
-  #             dt_fim  = dplyr::if_else(aplicar, max_venc, dt_fim),
-  #             status  = dplyr::if_else(aplicar, "VENCIDA", status),
-  #             desc_evento_fim = dplyr::if_else(aplicar, "Prazo expirado (sem renovação)", desc_evento_fim)
-  #           ) |>
-  #           dplyr::select(-aplicar)
-  #       }
-  #     }
-  #   }
-    
-  #   h
-  # })
-
-  cp_historico_p <- reactive({
-    p <- cp_proc_sel()
-    if (is.null(p) || is.null(cfem_inapto_historico)) return(NULL)
-    h <- cfem_inapto_historico[cfem_inapto_historico$processo == p, , drop = FALSE]
-    if (nrow(h) == 0) return(NULL)
-    
-    # [NOVO] Auditoria de Vencimento de Títulos (Mata as fases "zumbi")
-    if (exists("micro_titulos") && !is.null(micro_titulos)) {
-      df_tits <- micro_titulos[micro_titulos$processo == p, , drop = FALSE]
-      if (nrow(df_tits) > 0 && "dt_vencimento" %in% names(df_tits)) {
-        
-        # 1. Filtra as datas, ignorando os campos em branco (NA)
-        datas_validas <- suppressWarnings(as.Date(stats::na.omit(df_tits$dt_vencimento)))
-        
-        # Só prossegue se existir alguma data válida anotada
-        if (length(datas_validas) > 0) {
-          max_venc <- max(datas_validas)
-          
-          # 2. Se a maior data registrada já passou do dia de hoje, testamos se afeta a fase atual
-          if (max_venc < Sys.Date()) {
-            
-            # Encontra a linha que está "em aberto" (Atual) e que começou antes de vencer
-            idx_ativa <- which(is.na(h$dt_fim) & h$status == "ATIVA" & (!is.na(h$dt_inicio) & max_venc >= h$dt_inicio))
-            
-            if (length(idx_ativa) > 0) {
-              novas_linhas <- list()
-              
-              for (i in idx_ativa) {
-                # PASSO A: Mantém o período antigo como "ATIVO", mas encerra ele na data de vencimento
-                h$dt_fim[i] <- max_venc
-                h$desc_evento_fim[i] <- "Vencimento do título"
-                
-                # PASSO B: Cria a TERCEIRA LINHA (o período vencido) que começa no dia seguinte
-                nl <- h[i, ]
-                nl$dt_inicio <- max_venc + 1
-                nl$dt_fim <- as.Date(NA)
-                nl$status <- "VENCIDA"
-                nl$desc_evento_inicio <- "Prazo expirado (sem renovação)"
-                nl$desc_evento_fim <- NA_character_
-                
-                novas_linhas[[length(novas_linhas) + 1]] <- nl
-              }
-              
-              # Junta a linha nova e reordena as datas
-              h <- dplyr::bind_rows(h, novas_linhas) |> dplyr::arrange(dt_inicio)
-            }
-          }
-        }
-      }
-    }
-    
-    h
-  })
-
-  cp_serie_proc <- reactive({
-    s <- cp_serie_p_raw(); if (is.null(s)) return(NULL)
-    # Agrega por mês (múltiplas substâncias no mesmo mês somadas)
-    s |>
-      dplyr::group_by(data_cfem, ANO, MES) |>
-      dplyr::summarise(
-        VALORarr      = sum(VALORarr,      na.rm = TRUE),
-        PESO_KG_final = sum(PESO_KG_final, na.rm = TRUE),
-        suspeita      = any(suspeita, na.rm = TRUE),
-        .groups = "drop"
-      ) |>
-      dplyr::arrange(data_cfem)
-  })
-
-  cp_shapes <- reactive({
-    p <- cp_proc_sel(); req(p)
-    cp_shapes_inapto(p)
-  })
-
-  output$cp_grafico_valor <- renderPlotly({
-    s <- cp_serie_proc(); req(s)
-    p <- cp_proc_sel()
-    plot_ly(s, x = ~data_cfem, y = ~VALORarr, type = "scatter", mode = "lines+markers",
-            line = list(color = "#1B4332", width = 2),
-            marker = list(color = ifelse(s$suspeita, "#C0392B", "#2D6A4F"), size = 6),
-            hovertemplate = "%{x|%m/%Y}<br>R$ %{y:,.2f}<extra></extra>") |>
-      layout(shapes = cp_shapes(),
-             xaxis = list(title = ""), yaxis = list(title = "R$"),
-             margin = list(l = 60, r = 20, t = 10, b = 30),
-             showlegend = FALSE)
-  })
-
-  output$cp_grafico_peso <- renderPlotly({
-    s <- cp_serie_proc(); req(s)
-    p <- cp_proc_sel()
-    plot_ly(s, x = ~data_cfem, y = ~PESO_KG_final, type = "scatter", mode = "lines+markers",
-            line = list(color = "#34495E", width = 2),
-            marker = list(color = ifelse(s$suspeita, "#C0392B", "#2D6A4F"), size = 6),
-            hovertemplate = "%{x|%m/%Y}<br>%{y:,.2f} kg<extra></extra>") |>
-      layout(shapes = cp_shapes(),
-             xaxis = list(title = ""), yaxis = list(title = "kg"),
-             margin = list(l = 60, r = 20, t = 10, b = 30),
-             showlegend = FALSE)
-  })
-
-  output$cp_grafico_fases <- renderPlotly({
-    h <- cp_historico_p(); req(h)
-
-    # [SALVA-VIDAS] Tenta deduzir a fase caso o script 06 não a tenha enviado
-    if (!"tipo_proc" %in% names(h) || all(is.na(h$tipo_proc))) {
-      h <- h |>
-        dplyr::mutate(
-          tipo_proc = dplyr::case_when(
-            grepl("Concessão Lavra", desc_evento_inicio, ignore.case = TRUE) ~ "CONC LAV",
-            grepl("PLG", desc_evento_inicio, ignore.case = TRUE) ~ "PLG",
-            grepl("Licença", desc_evento_inicio, ignore.case = TRUE) ~ "LICEN",
-            grepl("GU ", desc_evento_inicio, ignore.case = TRUE) ~ "AUT PESQ",
-            grepl("Extração", desc_evento_inicio, ignore.case = TRUE) ~ "REG EXT",
-            TRUE ~ NA_character_
-          )
-        )
-    }
-
-    # Paleta de cores distintas para cada fase
-    cores_tipo <- c(
-      "CONC LAV"  = "#5DADE2", 
-      "PLG"       = "#F5B041", 
-      "LICEN"     = "#AF7AC5", 
-      "AUT PESQ"  = "#48C9B0", 
-      "REG EXT"   = "#F4D03F"  
-    )
-    cores_status <- c(
-      ATIVA           = "#2D6A4F",
-      SUSPENSA        = "#856404",
-      ENCERRADA       = "#A32D2D",
-      GAP             = "#ADB5BD",
-      PRE_AUTORIZACAO = "#CED4DA",
-      SEM_AUTORIZACAO = "#DEE2E6"
-    )
-
-    get_cor <- function(tipo, status) {
-      if (!is.na(tipo) && !is.null(tipo) && tipo %in% names(cores_tipo)) {
-        if (!is.na(status) && status == "SUSPENSA")  return(unname(cores_status["SUSPENSA"]))
-        if (!is.na(status) && status == "ENCERRADA") return(unname(cores_status["ENCERRADA"]))
-        return(unname(cores_tipo[tipo]))
-      }
-      unname(cores_status[status %||% "GAP"]) %||% "#ADB5BD"
-    }
-
-    dt_ref_min <- min(h$dt_fim[!is.na(h$dt_fim)], na.rm = TRUE)
-    if (is.infinite(dt_ref_min)) dt_ref_min <- Sys.Date() - 365 * 10
-
-    # Construir os blocos (shapes) sem bordas brancas
-    shapes <- lapply(seq_len(nrow(h)), function(i) {
-      r <- h[i, ]
-      x0 <- if (is.na(r$dt_inicio)) dt_ref_min - 365 else r$dt_inicio
-      x1 <- if (is.na(r$dt_fim))    Sys.Date()         else r$dt_fim
-      
-      cor <- get_cor(r$tipo_proc, r$status)
-      opacidade <- if(!is.na(r$status) && r$status %in% c("SUSPENSA", "ENCERRADA")) "55" else "90"
-      
-      list(type = "rect", xref = "x", yref = "paper",
-           x0 = as.character(x0), x1 = as.character(x1), y0 = 0, y1 = 1,
-           fillcolor = paste0(cor, opacidade),
-           line = list(width = 0), 
-           layer = "below")
-    })
-
-    df_trace <- h |>
-      dplyr::mutate(
-        x_mid  = as.Date(
-          (as.numeric(dplyr::if_else(is.na(dt_inicio), dt_ref_min - 365, dt_inicio)) +
-           as.numeric(dplyr::if_else(is.na(dt_fim),    Sys.Date(),        dt_fim))) / 2,
-          origin = "1970-01-01"),
-        label_fase = dplyr::case_when(
-          status == "GAP"             ~ "GAP (sem autorização)",
-          status == "PRE_AUTORIZACAO" ~ "Pré-autorização",
-          status == "SEM_AUTORIZACAO" ~ "Sem autorização",
-          !is.na(tipo_proc)           ~ paste0(tipo_proc, dplyr::if_else(status %in% c("SUSPENSA", "ENCERRADA"), paste0(" (", status, ")"), "")),
-          TRUE                        ~ status
-        ),
-        tooltip = paste0("<b>", label_fase, "</b>",
-                         dplyr::if_else(!is.na(desc_evento_inicio), paste0("<br>Início: ", desc_evento_inicio), ""),
-                         dplyr::if_else(!is.na(desc_evento_fim),    paste0("<br>Fim: ",    desc_evento_fim),    ""))
-      )
-
-    p <- plot_ly()
-    
-    # 1. ADICIONA AS CORES NA LEGENDA OFICIAL
-    categorias <- unique(df_trace$label_fase)
-    for (cat in categorias) {
-      cor_cat <- get_cor(df_trace$tipo_proc[df_trace$label_fase == cat][1], 
-                         df_trace$status[df_trace$label_fase == cat][1])
-      
-      p <- p |> add_trace(
-        x = c(NA), y = c(NA), # Linha fantasma só para a legenda
-        type = "scatter", mode = "markers",
-        marker = list(symbol = "square", size = 15, color = cor_cat),
-        name = cat,
-        hoverinfo = "none"
-      )
-    }
-
-    # 2. ADICIONA AS "BOLINHAS INVISÍVEIS" PARA O TOOLTIP FUNCIONAR
-    p <- p |> add_trace(
-      data = df_trace, x = ~x_mid, y = ~0.5,
-      type = "scatter", mode = "markers",
-      marker = list(size = 1, opacity = 0),
-      text = ~tooltip, hovertemplate = "%{text}<extra></extra>",
-      showlegend = FALSE
-    )
-
-    # 3. DESENHA OS BLOCOS LIVRES (SEM TRAVA DE ZOOM)
-    p |> layout(
-      shapes  = shapes,
-      xaxis   = list(title = "", type = "date", showgrid = FALSE), # TRAVA (range) REMOVIDA AQUI!
-      yaxis   = list(title = "", visible = FALSE, range = c(0, 1), showgrid = FALSE),
-      margin  = list(l = 60, r = 20, t = 10, b = 10),
-      legend  = list(orientation = "h", x = 0, y = -0.3, font = list(size = 11)),
-      showlegend = TRUE
-    )
-  })
-
-  # ---- Gráficos da trajetória CFEM e Histórico ----
+  # ---- Grafico de historico do processo (Peca C: grafico_historico_processo)
+  # Substitui o antigo par cp_grafico_valor/cp_grafico_peso (plotly cru) e a
+  # tabela cp_tabela_fases — tudo consolidado num unico grafico ggplot, com ou
+  # sem CFEM, evento a evento, sem nenhuma agregacao.
+  #
+  # RENDER ESTATICO (renderPlot), NAO ggplotly(): geom_rect(ymin/ymax = Inf) e
+  # geom_text(y = Inf) — a faixa vermelha de vigencia e os rotulos verticais —
+  # nao convertem de forma confiavel para plotly (limitacao conhecida da
+  # conversao ggplot2->plotly com extensao infinita). O mesmo grafico, do
+  # jeito que esta, ja foi validado visualmente no script da COOGAM rodando
+  # como ggplot2 puro — aqui e o mesmo caminho, so que dentro do Shiny.
+  # Perde-se zoom/hover interativo; ganha-se ficar igual ao que ja validamos. ----
   output$cp_grafico_ui <- renderUI({
     p <- cp_proc_sel()
     if (is.null(p)) return(NULL)
-    
-    # 1. Gráficos de CFEM (Apenas se o processo tiver arrecadação suspeita)
-    graficos_cfem <- NULL
-    if (!is.null(cfem_inapto_serie) && p %in% cfem_inapto_serie$processo) {
-      graficos_cfem <- tagList(
-        tags$div(style = "font-weight:600; margin-bottom:6px; color:#2C3E50;",
-                 "Trajetória de declarações CFEM — período inapto sombreado"),
-        plotlyOutput("cp_grafico_valor", height = "240px"),
-        div(style = "height:8px;"),
-        plotlyOutput("cp_grafico_peso", height = "240px"),
-        div(style = "height:20px;")
-      )
-    }
-    
-    # 2. Tabela de Histórico (Aparece SEMPRE, para todos os processos)
-    tabela_historico <- tagList(
-      tags$div(style = "font-weight:600; margin-top:10px; margin-bottom:4px; color:#2C3E50;",
-               "Histórico de autorizações (fases do processo)"),
-      DTOutput("cp_tabela_fases", height = "auto")
+    tagList(
+      tags$div(style = "font-weight:600; margin-bottom:6px; color:#2C3E50;",
+               "Historico do processo"),
+      plotlyOutput("cp_grafico_valor", height = "260px"),
+      div(style = "height:8px;"),
+      plotlyOutput("cp_grafico_peso", height = "260px"),
+      div(style = "height:14px;"),
+      tags$div(style = "font-weight:600; margin-bottom:6px; color:#2C3E50;",
+               "Historico de autorizacoes (fases do processo)"),
+      DTOutput("cp_tabela_fases"),
+      div(style = "height:14px;")
     )
-    
-    tags$div(style = "margin-bottom:14px;", graficos_cfem, tabela_historico)
   })
 
-  # [As funções cp_shapes_inapto, cp_serie_p_raw e cp_serie_proc continuam iguais e intactas aqui]
+  cp_dados_cfem_proc <- reactive({
+    p <- cp_proc_sel(); req(p)
+    if (is.null(cfem_declaracoes_dossie)) return(NULL)
+    d <- cfem_declaracoes_dossie[cfem_declaracoes_dossie$PROCESSO == p, , drop = FALSE]
+    if (nrow(d) == 0) NULL else d
+  })
 
-  cp_historico_p <- reactive({
-    p <- cp_proc_sel()
-    if (is.null(p) || is.null(cfem_inapto_historico)) return(NULL)
-    
-    h <- cfem_inapto_historico[cfem_inapto_historico$processo == p, , drop = FALSE]
-    
-    # [NOVO] Auditoria de Vencimento de Títulos (Mata as fases "zumbi")
-    if (nrow(h) > 0 && exists("micro_titulos") && !is.null(micro_titulos)) {
-      df_tits <- micro_titulos[micro_titulos$processo == p, , drop = FALSE]
-      if (nrow(df_tits) > 0 && "dt_vencimento" %in% names(df_tits)) {
-        datas_validas <- suppressWarnings(as.Date(stats::na.omit(df_tits$dt_vencimento)))
-        if (length(datas_validas) > 0) {
-          max_venc <- max(datas_validas)
-          if (max_venc < Sys.Date()) {
-            idx_ativa <- which(is.na(h$dt_fim) & h$status == "ATIVA" & (!is.na(h$dt_inicio) & max_venc >= h$dt_inicio))
-            if (length(idx_ativa) > 0) {
-              novas_linhas <- list()
-              for (i in idx_ativa) {
-                h$dt_fim[i] <- max_venc
-                h$desc_evento_fim[i] <- "Vencimento do título"
-                nl <- h[i, ]
-                nl$dt_inicio <- max_venc + 1
-                nl$dt_fim <- as.Date(NA)
-                nl$status <- "VENCIDA"
-                nl$desc_evento_inicio <- "Prazo expirado (sem renovação)"
-                nl$desc_evento_fim <- NA_character_
-                novas_linhas[[length(novas_linhas) + 1]] <- nl
-              }
-              h <- dplyr::bind_rows(h, novas_linhas) |> dplyr::arrange(dt_inicio)
+  # Versao PLOTLY NATIVA (nao ggplotly) — mesmo padrao do app.R original,
+  # com hover e aparencia melhores. Ver graficos_historico.R para a fonte
+  # da verdade / comentarios completos.
+  cp_grafico_reactivo_plotly <- function(variavel) {
+    reactive({
+      p <- cp_proc_sel(); req(p)
+      grafico_historico_processo_plotly(
+        processo_alvo = p,
+        dados_cfem = cp_dados_cfem_proc(),
+        situacao_documental = situacao_documental,
+        protocolos_licenca_ambiental = protocolos_licenca_ambiental,
+        eventos_classificados = eventos_classificados,
+        serie_fase_status = serie_fase_status,
+        variavel = variavel
+      )
+    })
+  }
+  cp_grafico_valor_obj <- cp_grafico_reactivo_plotly("valor")
+  cp_grafico_peso_obj  <- cp_grafico_reactivo_plotly("peso")
+
+  output$cp_grafico_valor <- renderPlotly({
+    req(cp_grafico_valor_obj())
+    cp_grafico_valor_obj() |> plotly::config(displayModeBar = FALSE)
+  })
+  output$cp_grafico_peso <- renderPlotly({
+    req(cp_grafico_peso_obj())
+    cp_grafico_peso_obj() |> plotly::config(displayModeBar = FALSE)
+  })
+
+  # ---- Historico de autorizacoes (fases do processo) — serie_fase_status
+  # (blocos de fase/status, do 06), FILTRADO para so o que responde a
+  # pergunta que essa tabela existe pra responder: "esse titulo permitia
+  # extracao de fato, e o que aconteceu com ele?" — decisao explicita do
+  # usuario: fora requerimento/pesquisa/disponibilidade (REQ PLG, REQ PESQ,
+  # AUT PESQ etc.), dentro PRE_AUTORIZACAO (contexto de quando o processo
+  # comecou) + as 4 fases que operam (mesmo vocabulario do 06/07) + protocolos
+  # de licenca ambiental como linha propria (antes so apareciam no grafico).
+  FASES_QUE_OPERAM_TABELA <- c("CONC LAV", "LICEN", "PLG", "REG EXT")  # ver 06_serie_temporal.R / 07_proc_shiny_dossie.R
+
+  # Sentinela pra ordenar com PRE_AUTORIZACAO (dt_inicio = NA) SEMPRE primeiro
+  # — arrange()/order() por padrao colocam NA por ultimo, o que jogava
+  # PRE_AUTORIZACAO pro fim da tabela (errado: e o inicio da historia).
+  ordenar_por_data <- function(df) {
+    df[order(dplyr::coalesce(df$dt_inicio, as.Date("1900-01-01"))), , drop = FALSE]
+  }
+
+  cp_historico_fases_p <- reactive({
+    p <- cp_proc_sel(); req(p)
+    if (is.null(serie_fase_status)) return(NULL)
+    h <- serie_fase_status[serie_fase_status$processo == p, , drop = FALSE]
+    if (nrow(h) == 0) return(NULL)
+
+    # Filtro: PRE_AUTORIZACAO sempre entra; o resto so se for uma das 4 fases
+    # que de fato autorizam extracao (descarta requerimento/pesquisa/
+    # disponibilidade, e qualquer GAP que tenha herdado uma dessas fases).
+    h <- h[h$status == "PRE_AUTORIZACAO" | h$fase %in% FASES_QUE_OPERAM_TABELA, , drop = FALSE]
+    if (nrow(h) == 0) return(NULL)
+    h <- ordenar_por_data(h)
+    h$evento_inicio <- NA_character_
+    h$evento_fim    <- NA_character_
+
+    ev_p <- if (!is.null(eventos_classificados))
+      eventos_classificados[eventos_classificados$processo == p, , drop = FALSE] else NULL
+
+    desc_evento_em <- function(data_alvo) {
+      if (is.null(ev_p) || is.na(data_alvo) || nrow(ev_p) == 0) return(NA_character_)
+      m <- ev_p[ev_p$dtevento == data_alvo, , drop = FALSE]
+      if (nrow(m) == 0) return(NA_character_)
+      paste(unique(m$dsevento), collapse = " | ")
+    }
+    for (i in seq_len(nrow(h))) {
+      h$evento_inicio[i] <- desc_evento_em(h$dt_inicio[i])
+      h$evento_fim[i]    <- desc_evento_em(h$dt_fim[i])
+    }
+
+    # Injecao da fase "VENCIDA": se o titulo mais recente ja venceu e a ultima
+    # fase ATIVA (a que esta com dt_fim em aberto) comecou antes desse
+    # vencimento, fecha ela na data do vencimento e abre uma nova fase
+    # sintetica "VENCIDA" a partir do dia seguinte.
+    if (!is.null(situacao_documental)) {
+      doc_p <- situacao_documental[situacao_documental$processo == p, , drop = FALSE]
+      datas_venc <- stats::na.omit(doc_p$dt_vencimento)
+      if (length(datas_venc) > 0) {
+        max_venc <- max(datas_venc)
+        if (max_venc < Sys.Date()) {
+          idx_ativa <- which(is.na(h$dt_fim) & h$status == "ATIVA" &
+                                !is.na(h$dt_inicio) & max_venc >= h$dt_inicio)
+          if (length(idx_ativa) > 0) {
+            novas <- list()
+            for (i in idx_ativa) {
+              h$dt_fim[i]      <- max_venc
+              h$evento_fim[i]  <- "Vencimento do titulo"
+              nl <- h[i, ]
+              nl$dt_inicio     <- max_venc + 1
+              nl$dt_fim        <- as.Date(NA)
+              nl$status        <- "VENCIDA"
+              nl$evento_inicio <- "Prazo expirado (sem renovacao)"
+              nl$evento_fim    <- NA_character_
+              novas[[length(novas) + 1]] <- nl
             }
+            h <- dplyr::bind_rows(h, novas)
           }
         }
       }
     }
-    h
+
+    # Intercala protocolos de licenca ambiental como linha propria (pedido:
+    # "mostrar quando as lic amb foram protocoladas" direto na tabela, nao
+    # so no hover do grafico).
+    if (!is.null(protocolos_licenca_ambiental)) {
+      lic_p <- protocolos_licenca_ambiental[protocolos_licenca_ambiental$processo == p, , drop = FALSE]
+      if (nrow(lic_p) > 0) {
+        lic_rows <- data.frame(
+          processo = p, dt_inicio = lic_p$dt_protocolo, dt_fim = as.Date(NA),
+          fase = "LIC AMB", status = "PROTOCOLADA",
+          evento_inicio = lic_p$dsevento, evento_fim = NA_character_
+        )
+        h <- dplyr::bind_rows(h, lic_rows)
+      }
+    }
+
+    ordenar_por_data(h)
   })
 
-  # [As funções output$cp_grafico_valor e output$cp_grafico_peso continuam intactas aqui]
-
   output$cp_tabela_fases <- renderDT({
-    h <- cp_historico_p()
-    p <- cp_proc_sel()
+    h <- cp_historico_fases_p()
+    validate(need(!is.null(h), "Sem historico de fases que autorizem extracao para este processo."))
 
-    # 1. Cria estrutura vazia padrão caso o processo não tenha histórico nenhum
-    df_show <- data.frame(
-      `Fase` = character(0), `Status` = character(0), `Data Início` = character(0),
-      `Data Fim` = character(0), `Evento Início` = character(0), `Evento Fim` = character(0),
+    # "Atual" so faz sentido pra fase em aberto (ATIVA/SUSPENSA/VENCIDA, onde
+    # dt_fim=NA significa "ainda nao terminou"). Protocolo de licenca
+    # ambiental e um evento PONTUAL — nunca teve "fim" pra comecar, entao NA
+    # ali e travessao, nao "Atual".
+    fmt_data_fim <- function(x, status) {
+      dplyr::case_when(
+        !is.na(x)             ~ format(x, "%d/%m/%Y"),
+        status == "PROTOCOLADA" ~ "—",
+        TRUE                  ~ "Atual"
+      )
+    }
+    tab <- data.frame(
+      Fase          = dplyr::coalesce(h$fase, "—"),
+      Status        = h$status,
+      `Data Início` = ifelse(is.na(h$dt_inicio), "—", format(h$dt_inicio, "%d/%m/%Y")),
+      `Data Fim`    = fmt_data_fim(h$dt_fim, h$status),
+      `Evento Início` = dplyr::coalesce(h$evento_inicio, "—"),
+      `Evento Fim`    = dplyr::coalesce(h$evento_fim, "—"),
       check.names = FALSE
     )
 
-    # Preenche com os dados da ANM se eles existirem
-    if (!is.null(h) && nrow(h) > 0) {
-      if (!"tipo_proc" %in% names(h) || all(is.na(h$tipo_proc))) {
-        h <- h |>
-          dplyr::mutate(
-            tipo_proc = dplyr::case_when(
-              grepl("Concessão Lavra", desc_evento_inicio, ignore.case = TRUE) ~ "CONC LAV",
-              grepl("PLG", desc_evento_inicio, ignore.case = TRUE) ~ "PLG",
-              grepl("Licença", desc_evento_inicio, ignore.case = TRUE) ~ "LICEN",
-              grepl("GU ", desc_evento_inicio, ignore.case = TRUE) ~ "AUT PESQ",
-              grepl("Extração", desc_evento_inicio, ignore.case = TRUE) ~ "REG EXT",
-              TRUE ~ NA_character_
-            )
-          )
-      }
+    cores_status <- c(ATIVA = "#D4EDDA", SUSPENSA = "#FFF3CD", ENCERRADA = "#F8D7DA",
+                       VENCIDA = "#F8D7DA", GAP = "#E2E3E5", PRE_AUTORIZACAO = "#E2E3E5",
+                       PROTOCOLADA = "#D1ECF1")
 
-      df_show <- h |>
-        dplyr::transmute(
-          dt_ordem        = dt_inicio,
-          `Fase`          = dplyr::coalesce(tipo_proc, "—"),
-          `Status`        = status,
-          `Data Início`   = dplyr::if_else(is.na(dt_inicio), "—", format(dt_inicio, "%d/%m/%Y")),
-          `Data Fim`      = dplyr::if_else(is.na(dt_fim), "Atual", format(dt_fim, "%d/%m/%Y")),
-          `Evento Início` = dplyr::coalesce(desc_evento_inicio, "—"),
-          `Evento Fim`    = dplyr::coalesce(desc_evento_fim, "—")
-        )
-    } else {
-        # Se não tem histórico da ANM, inicializa a coluna oculta de ordem de data
-        df_show$dt_ordem <- as.Date(character(0)) 
-    }
-
-    # 2. INJETA OS EVENTOS DE LICENÇA AMBIENTAL NA CRONOLOGIA
-    if (!is.null(p)) {
-      df_eventos <- cp_bloco(micro_eventos, p)
-      if (!is.null(df_eventos) && nrow(df_eventos) > 0 && "evento" %in% names(df_eventos)) {
-        licencas <- df_eventos |>
-          dplyr::filter(grepl("licen[çc]a ambiental|licen[çc]a pr[ée]via|licen[çc]a de instala[çc][ãa]o|licen[çc]a de opera[çc][ãa]o", evento, ignore.case = TRUE))
-        
-        if (nrow(licencas) > 0) {
-          df_lic <- licencas |>
-            dplyr::transmute(
-              dt_ordem        = as.Date(data),
-              `Fase`          = "MEIO AMBIENTE",
-              `Status`        = "LICENÇA PROTOCOLADA",
-              `Data Início`   = format(as.Date(data), "%d/%m/%Y"),
-              `Data Fim`      = "—",
-              `Evento Início` = evento,
-              `Evento Fim`    = "—"
-            )
-          df_show <- dplyr::bind_rows(df_show, df_lic)
-        }
-      }
-    }
-
-    # 3. Ordena os eventos e monta a tabela final
-    if (nrow(df_show) > 0) {
-      df_show <- df_show |>
-        dplyr::arrange(dplyr::desc(dt_ordem)) |>
-        dplyr::select(-dt_ordem)
-    }
-
-    dt <- DT::datatable(df_show, rownames = FALSE, class = "compact",
-      options = list(
-        dom = "tp", pageLength = 8, scrollX = TRUE,
-        language = list(zeroRecords = "Nenhum histórico encontrado.", emptyTable = "Nenhum histórico encontrado.", infoEmpty = ""),
-        columnDefs = list(list(targets = "_all", className = "dt-left"))
-      ), selection = "none"
-    )
-
-    dt |> DT::formatStyle(
-      "Status",
-      backgroundColor = DT::styleEqual(
-        c("ATIVA", "SUSPENSA", "ENCERRADA", "VENCIDA", "GAP", "PRE_AUTORIZACAO", "SEM_AUTORIZACAO", "LICENÇA PROTOCOLADA"),
-        c("#D4EDDA", "#FFF3CD", "#F8D7DA", "#F8D7DA", "#E2E3E5", "#E2E3E5", "#E2E3E5", "#F4ECF7") 
-      ),
-      color = DT::styleEqual(
-        c("ATIVA", "SUSPENSA", "ENCERRADA", "VENCIDA", "GAP", "PRE_AUTORIZACAO", "SEM_AUTORIZACAO", "LICENÇA PROTOCOLADA"),
-        c("#155724", "#856404", "#721C24", "#721C24", "#383D41", "#383D41", "#383D41", "#8E44AD") 
-      ),
-      fontWeight = "bold"
-    )
-  }, server = TRUE)
-
-
-  # output$cp_tabela_fases <- renderDT({
-  #   h <- cp_historico_p(); req(h)
-  #   p <- cp_proc_sel()
-
-  #   # [SALVA-VIDAS] Tenta deduzir a fase caso o script 06 não a tenha enviado
-  #   if (!"tipo_proc" %in% names(h) || all(is.na(h$tipo_proc))) {
-  #     h <- h |>
-  #       dplyr::mutate(
-  #         tipo_proc = dplyr::case_when(
-  #           grepl("Concessão Lavra", desc_evento_inicio, ignore.case = TRUE) ~ "CONC LAV",
-  #           grepl("PLG", desc_evento_inicio, ignore.case = TRUE) ~ "PLG",
-  #           grepl("Licença", desc_evento_inicio, ignore.case = TRUE) ~ "LICEN",
-  #           grepl("GU ", desc_evento_inicio, ignore.case = TRUE) ~ "AUT PESQ",
-  #           grepl("Extração", desc_evento_inicio, ignore.case = TRUE) ~ "REG EXT",
-  #           TRUE ~ NA_character_
-  #         )
-  #       )
-  #   }
-
-  #   # 1. PREPARA AS FASES DA ANM
-  #   df_show <- h |>
-  #     dplyr::transmute(
-  #       dt_ordem        = dt_inicio,
-  #       `Fase`          = dplyr::coalesce(tipo_proc, "—"),
-  #       `Status`        = status,
-  #       `Data Início`   = dplyr::if_else(is.na(dt_inicio), "—", format(dt_inicio, "%d/%m/%Y")),
-  #       `Data Fim`      = dplyr::if_else(is.na(dt_fim), "Atual", format(dt_fim, "%d/%m/%Y")),
-  #       `Evento Início` = dplyr::coalesce(desc_evento_inicio, "—"),
-  #       `Evento Fim`    = dplyr::coalesce(desc_evento_fim, "—")
-  #     )
-
-  #   # 2. INJETA OS EVENTOS DE LICENÇA AMBIENTAL NA CRONOLOGIA
-  #   df_eventos <- cp_bloco(micro_eventos, p)
-  #   if (!is.null(df_eventos) && "evento" %in% names(df_eventos)) {
-  #     # Busca por eventos que contenham os nomes oficiais de licenças na ANM
-  #     licencas <- df_eventos |>
-  #       dplyr::filter(grepl("licen[çc]a ambiental|licen[çc]a pr[ée]via|licen[çc]a de instala[çc][ãa]o|licen[çc]a de opera[çc][ãa]o", evento, ignore.case = TRUE))
-      
-  #     if (nrow(licencas) > 0) {
-  #       df_lic <- licencas |>
-  #         dplyr::transmute(
-  #           dt_ordem        = as.Date(data),
-  #           `Fase`          = "MEIO AMBIENTE",
-  #           `Status`        = "LICENÇA PROTOCOLADA",
-  #           `Data Início`   = format(as.Date(data), "%d/%m/%Y"),
-  #           `Data Fim`      = "—",
-  #           `Evento Início` = evento,
-  #           `Evento Fim`    = "—"
-  #         )
-        
-  #       # Une as fases com os eventos de licença
-  #       df_show <- dplyr::bind_rows(df_show, df_lic)
-  #     }
-  #   }
-
-  #   # 3. ORDENA TUDO (Do mais recente para o mais antigo) e limpa coluna temporária
-  #   df_show <- df_show |>
-  #     dplyr::arrange(dplyr::desc(dt_ordem)) |>
-  #     dplyr::select(-dt_ordem)
-
-  #   # 4. RENDERIZA A TABELA
-  #   dt <- DT::datatable(df_show, rownames = FALSE, class = "compact",
-  #     options = list(
-  #       dom = "tp",
-  #       pageLength = 8, # Aumentei um pouco o tamanho da página para caberem as licenças
-  #       scrollX = TRUE,
-  #       language = list(
-  #         zeroRecords = "Nenhum histórico encontrado.",
-  #         emptyTable = "Nenhum histórico encontrado.",
-  #         infoEmpty = ""
-  #       ),
-  #       columnDefs = list(
-  #         list(targets = "_all", className = "dt-left")
-  #       )
-  #     ),
-  #     selection = "none"
-  #   )
-
-  #   # 5. CORES TURBINADAS
-  #   dt |> DT::formatStyle(
-  #     "Status",
-  #     backgroundColor = DT::styleEqual(
-  #       c("ATIVA", "SUSPENSA", "ENCERRADA", "VENCIDA", "GAP", "PRE_AUTORIZACAO", "SEM_AUTORIZACAO", "LICENÇA PROTOCOLADA"),
-  #       c("#D4EDDA", "#FFF3CD", "#F8D7DA", "#F8D7DA", "#E2E3E5", "#E2E3E5", "#E2E3E5", "#F4ECF7") 
-  #     ),
-  #     color = DT::styleEqual(
-  #       c("ATIVA", "SUSPENSA", "ENCERRADA", "VENCIDA", "GAP", "PRE_AUTORIZACAO", "SEM_AUTORIZACAO", "LICENÇA PROTOCOLADA"),
-  #       c("#155724", "#856404", "#721C24", "#721C24", "#383D41", "#383D41", "#383D41", "#8E44AD") 
-  #     ),
-  #     fontWeight = "bold"
-  #   )
-  # }, server = TRUE)
+    # ordering = FALSE: essa tabela e uma narrativa cronologica construida por
+    # nos (PRE_AUTORIZACAO sempre primeiro) — deixar o usuario clicar no
+    # cabecalho e reordenar por texto quebraria essa leitura.
+    DT::datatable(tab, rownames = FALSE, class = "compact", selection = "none",
+      options = list(scrollX = TRUE, dom = "t", pageLength = -1, ordering = FALSE)) |>
+      DT::formatStyle("Status", backgroundColor = DT::styleEqual(names(cores_status), unname(cores_status)))
+  })
 
   output$cp_dossie_cabecalho <- renderUI({
     p <- cp_proc_sel()
@@ -3401,9 +3431,10 @@ server <- function(input, output, session) {
     if (is.null(df)) return(DT::datatable(data.frame(Aviso = "Dados indisponíveis.")))
     if ("data" %in% names(df)) df <- df[order(df$data, decreasing = TRUE), , drop = FALSE]
 
-    # Cores por papel (eventos decisivos na lógica de aptidão)
-    papel_cor <- c(ABRE = "#D4EDDA", FECHA = "#F8D7DA", SUSPENDE = "#FFF3CD", RETOMA = "#D1ECF1")
-    papel_tx  <- c(ABRE = "#155724", FECHA = "#721C24", SUSPENDE = "#856404", RETOMA = "#0C5460")
+    # Cores por papel (eventos decisivos na logica de aptidao; NAO_CLASSIFICADO
+    # = evento existe no historico bruto mas nao entra na maquina de estado)
+    papel_cor <- c(MUDA_FASE = "#D4EDDA", FECHA = "#F8D7DA", SUSPENDE = "#FFF3CD", RETOMA = "#D1ECF1", NAO_CLASSIFICADO = "#F5F5F5")
+    papel_tx  <- c(MUDA_FASE = "#155724", FECHA = "#721C24", SUSPENDE = "#856404", RETOMA = "#0C5460", NAO_CLASSIFICADO = "#6C757D")
 
     # Remove coluna papel antes de exibir (usada só para estilo)
     papel_col <- if ("papel" %in% names(df)) df$papel else rep(NA_character_, nrow(df))
@@ -3468,10 +3499,7 @@ server <- function(input, output, session) {
     p <- cp_proc_sel()
     if (is.null(p)) return()
     geo <- NULL
-    if (!is.null(cfem_inapto) && inapto_ok) {
-      # geometria via pma_simpl se disponível (cfem_inapto não tem geometria)
-    }
-    if (is.null(geo) && exists("pma_simpl") && "PROCESSO" %in% names(pma_simpl)) {
+    if (exists("pma_simpl") && "PROCESSO" %in% names(pma_simpl)) {
       g <- pma_simpl[pma_simpl$PROCESSO == p, , drop = FALSE]
       if (nrow(g) > 0) geo <- sf::st_transform(g, 4326)
     }
