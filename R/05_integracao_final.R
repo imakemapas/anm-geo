@@ -18,6 +18,7 @@ suppressPackageStartupMessages({
   library(purrr)
   library(stringr)
   library(here)
+  library(ggplot2)
 })
 
 source(here::here("R", "utils.R"))
@@ -234,20 +235,6 @@ pma_tp <- pma_tp1 |>
     QUIov10km  = tidyr::replace_na(QUIov10km,  0L)
   )
 
-# EMBmtSEMA <- terra::vect(file.path(PRE_PROC_DIR, "sema_mt_embargos.shp"))
-# EMBmtSIGA <- terra::vect(file.path(PRE_PROC_DIR, "sema_mt_embargos_siga.shp"))
-# EMBib     <- terra::vect(file.path(PRE_PROC_DIR, "ibama_embargos.shp"))
-# EMBic     <- terra::vect(file.path(PRE_PROC_DIR, "icmbio_embargos.shp"))
-# INFmtSIGA <- terra::vect(file.path(PRE_PROC_DIR, "sema_mt_infracoes_siga.shp"))
-# INFic     <- terra::vect(file.path(PRE_PROC_DIR, "icmbio_infracoes.shp"))
-
-# pma_tp$inf_MT  <- as.integer(terra::is.related(pma_tp, INFmtSIGA, "intersects"))
-# pma_tp$inf_IC  <- as.integer(terra::is.related(pma_tp, INFic,     "intersects"))
-# pma_tp$emb_MTa <- as.integer(terra::is.related(pma_tp, EMBmtSEMA, "intersects"))
-# pma_tp$emb_MTb <- as.integer(terra::is.related(pma_tp, EMBmtSIGA, "intersects"))
-# pma_tp$emb_IB  <- as.integer(terra::is.related(pma_tp, EMBib,     "intersects"))
-# pma_tp$emb_IC  <- as.integer(terra::is.related(pma_tp, EMBic,     "intersects"))
-
 EMBmtSEMA <- carregar_shp_opcional(file.path(PRE_PROC_DIR, "sema_mt_embargos.shp"))
 EMBmtSIGA <- carregar_shp_opcional(file.path(PRE_PROC_DIR, "sema_mt_embargos_siga.shp"))
 EMBib     <- carregar_shp_opcional(file.path(PRE_PROC_DIR, "ibama_embargos.shp"))
@@ -290,7 +277,7 @@ print(sobrep_check)
 save_ckpt(pma_tp, "05_pma_tp")
 
 # =============================================================================
-# BLOCO 6 — CFEM (correção mantida: apenas OURO e CASSITERITA)
+# BLOCO 6 — CFEM (OURO e CASSITERITA)
 # =============================================================================
 
 processos_amzl <- load_ckpt("03_processos_amzl")
@@ -622,16 +609,232 @@ corrige_mineral_3checks <- function(cfem_final, mineral_label, subs_keep, subs_c
   cfem_final
 }
 
-# CASSITERITA (30-300 R$/kg)
-cfem_final <- corrige_mineral_3checks(cfem_final, "CASSITERITA", subs_keep = "CASSITERITA", subs_col = "SUBSarr",
-                                      pmin_kg = 30, pmax_kg = 300, min_med_plaus = 0.03, max_med_plaus = 0.30)
+# ============================================================================
+# CASSITERITA -- correcao por fator de 10 contra faixa absoluta
+# ("metodo white solder", validado em investigacao_white_solder.R)
+#
+# SUBSTITUI corrige_mineral_3checks() APENAS PARA CASSITERITA.
+# O OURO segue inalterado na funcao original (mediana hierarquica + fallback).
+# FASES_CORR / FASES_CORR_PADRAO nao sao alterados -- a cassiterita passa a
+# usar seu proprio vetor (FASES_CASS) abaixo.
+#
+# --- POR QUE MUDOU (diagnostico 2026-07-16, dados pre-correcao) -------------
+#   A mediana hierarquica falhava em massa nesta substancia. No processo
+#   886559/2004 (COOGER/RO), 48 de 100 declaracoes caiam no fallback
+#   'simples_1e-1'. Um fallback que dispara em ~50% dos casos nao e fallback.
+#
+#   Causa raiz: suggest_weight_row() escolhe o fator que MINIMIZA a distancia
+#   a mediana do grupo (which.min(dist_rel)) -- SEM exigir que o resultado
+#   caia na faixa plausivel. Com a mediana contaminada, ele "corrige" para
+#   fora da faixa e ainda marca como pow10_p*, que parece correcao de boa
+#   qualidade.
+#
+#   Este metodo inverte a ordem: filtra PRIMEIRO os fatores que garantem
+#   preco dentro de [pmin_kg, pmax_kg], e so entao escolhe o mais conservador
+#   (menor |log10(fator)|). E impossivel produzir resultado fora da faixa --
+#   ou corrige direito, ou marca dado_corrompido.
+#
+# --- ESCOPO (decisao metodologica, registrada) ------------------------------
+#   Fases (FASES_CASS): PLG + REQ PLG + AUT PESQUISA.
+#     Exclui CONCESSAO DE LAVRA (mineracao industrial), que dominava a serie
+#     pre-2018 e tem estrutura de preco distinta do garimpo. Consequencia:
+#     cassiterita em CONCESSAO DE LAVRA deixa de ser corrigida (corr fica
+#     "original"). Mudanca de comportamento consciente.
+#
+#   Dois subsets, MESMA faixa [30,300], processados SEPARADAMENTE:
+#     A) ANO >= 2018 -- faixa com respaldo empirico: 51%-94% das declaracoes
+#        ja caem em [30,300] SEM correcao alguma (2018:34,5% / 2019:52,3% /
+#        2020:51,1% / 2021:73,1% / 2022:84,6% / 2023:69,3% / 2024:77,7% /
+#        2025:94,4% / 2026:89,1%).
+#     B) ANO <= 2017 -- mesma faixa aplicada, mas aderencia observada de 0%
+#        em 2006/2007/2008/2010/2012/2015 (n=145 no total, 7,5% da base).
+#        Resultado esperado: alta taxa de dado_corrompido. Mantido no output
+#        como EVIDENCIA de que o periodo nao reconcilia com a faixa -- NAO
+#        como correcao confiavel. Analisar separadamente.
+#
+#   O corte em 2018 e EMPIRICO (salto de densidade e de aderencia a faixa),
+#   nao economico. Nao foi encontrada serie historica publica de preco de
+#   cassiterita que permitisse ancorar faixas por periodo; referencias
+#   pontuais de 2024 (Sec. Fazenda RO: R$107,55/kg; IBAMA: ~R$115/kg) sao
+#   compativeis com [30,300] mas nao cobrem o historico.
+# ============================================================================
+
+FASES_CASS <- c(
+  "LAVRA GARIMPEIRA",
+  "REQUERIMENTO DE LAVRA GARIMPEIRA",
+  "AUTORIZAÇÃO DE PESQUISA"
+)
+
+ANO_CORTE_CASS <- 2018
+
+# Nucleo do metodo: entre os fatores de 10 que jogam o preco DENTRO da faixa,
+# devolve o mais conservador (menor |log10|). Se nenhum resolve, NA + motivo.
+#   motivo 0 = sem_dado                 -> peso/valor ausente ou <= 0
+#   motivo 1 = dado_corrompido          -> nenhum fator de 10 reconcilia
+#   motivo 2 = resolvido
+#   motivo 3 = sem_quantidade_declarada -> QTD_MINERIO == 0 na origem
+#
+# ACHADO (auditoria 2026-07-16, processo 886559/2004 / COOGER, ano 2006):
+# 9 declaracoes tem QTD_MINERIO == 0 na fonte -- CFEM recolhida sem
+# quantidade de minerio declarada. O peso resultante e forcado a um valor
+# minimo (1 kg) em algum ponto a montante, e VALORtot/1 explode o preco
+# (R$490, R$5.363, R$11.920/kg). Isso NAO e erro de unidade: nenhum fator
+# de 10 conserta uma quantidade zero (0 * 10^n = 0). Marcar, nao corrigir.
+ws_fator_10 <- function(peso_g, valortot, pmin_g, pmax_g, qtd_minerio = NA_real_) {
+  if (!is.na(qtd_minerio) && qtd_minerio == 0) {
+    return(c(fator = NA_real_, motivo = 3))
+  }
+  if (is.na(peso_g) || is.na(valortot) || peso_g <= 0 || valortot <= 0) {
+    return(c(fator = NA_real_, motivo = 0))
+  }
+  ok <- fatores_simples[ {p <- valortot / (peso_g * fatores_simples); p >= pmin_g & p <= pmax_g} ]
+  if (length(ok) == 0) {
+    return(c(fator = NA_real_, motivo = 1))
+  }
+  c(fator = ok[which.min(abs(log10(ok)))], motivo = 2)
+}
+
+corrige_cassiterita_ws <- function(cfem_final, pmin_kg = 30, pmax_kg = 300,
+                                   subset_label, filtro_ano) {
+  pmin_g <- pmin_kg / 1000; pmax_g <- pmax_kg / 1000
+  qa_path_checks <- file.path(QA_DIR, "cfem_correcao_checks.csv")
+  mineral_label  <- paste0("CASSITERITA_", subset_label)
+
+  universo <- cfem_final |>
+    dplyr::filter(SUBSarr == "CASSITERITA", FASE %in% FASES_CASS, filtro_ano(ANO))
+
+  if (nrow(universo) == 0) {
+    message("[", mineral_label, "] subset vazio -- nada a fazer.")
+    return(cfem_final)
+  }
+
+  message("\n### ", mineral_label, " | n = ", nrow(universo), " ###")
+  report_check(universo, mineral_label, "CHECK 1 (antes)", pmin_kg, pmax_kg, qa_path_checks)
+
+  ws <- universo |>
+    dplyr::rowwise() |>
+    dplyr::mutate(
+      .r     = list(ws_fator_10(PESO_G, VALORtot, pmin_g, pmax_g,
+                                dplyr::if_else("QTD_MINERIO" %in% names(universo),
+                                               QTD_MINERIO, NA_real_))),
+      fator  = .r[["fator"]],
+      motivo = .r[["motivo"]]
+    ) |>
+    dplyr::ungroup() |>
+    dplyr::mutate(
+      # Peso so e alterado quando ha fator valido. Nos casos nao resolvidos
+      # (motivo 0/1/3) o peso ORIGINAL e preservado -- nunca inventamos numero.
+      PESO_G_ws  = dplyr::if_else(!is.na(fator), PESO_G * fator, PESO_G),
+      PESO_KG_ws = PESO_G_ws / 1000,
+      preco_g_ws = dplyr::if_else(!is.na(PESO_G_ws) & PESO_G_ws > 0,
+                                  VALORtot / PESO_G_ws, NA_real_),
+      corr_ws = dplyr::case_when(
+        motivo == 3                ~ "sem_quantidade_declarada",
+        motivo %in% c(0, 1)        ~ "dado_corrompido",
+        !is.na(fator) & fator == 1 ~ "original",
+        TRUE                       ~ paste0("pow10_p", round(log10(fator)))
+      )
+    ) |>
+    dplyr::select(row_id, PESO_G_ws, PESO_KG_ws, preco_g_ws, corr_ws)
+
+  cfem_final <- cfem_final |>
+    dplyr::left_join(ws, by = "row_id") |>
+    dplyr::mutate(
+      PESO_G_final  = dplyr::if_else(!is.na(PESO_G_ws),  PESO_G_ws,  PESO_G_final),
+      PESO_KG_final = dplyr::if_else(!is.na(PESO_KG_ws), PESO_KG_ws, PESO_KG_final),
+      preco_g_final = dplyr::if_else(!is.na(preco_g_ws), preco_g_ws, preco_g_final),
+      corr          = dplyr::if_else(!is.na(corr_ws),    corr_ws,    corr)
+    ) |>
+    dplyr::select(-PESO_G_ws, -PESO_KG_ws, -preco_g_ws, -corr_ws)
+
+  univ_pos <- cfem_final |>
+    dplyr::filter(SUBSarr == "CASSITERITA", FASE %in% FASES_CASS, filtro_ano(ANO))
+
+  report_check(univ_pos, mineral_label, "CHECK 2 (final)", pmin_kg, pmax_kg, qa_path_checks)
+
+  dist_corr <- univ_pos |> dplyr::count(corr, sort = TRUE)
+  message("[", mineral_label, "] distribuicao final de 'corr':")
+  print(dist_corr)
+  readr::write_csv(dist_corr |> dplyr::mutate(mineral = mineral_label, .before = 1),
+                   file.path(QA_DIR, paste0("cfem_distribuicao_corr_", tolower(mineral_label), ".csv")))
+
+  nao_corrigidos <- univ_pos |>
+    dplyr::filter(corr %in% c("dado_corrompido", "sem_quantidade_declarada"))
+  if (nrow(nao_corrigidos) > 0) {
+    message("[", mineral_label, "] nao corrigidos: ", nrow(nao_corrigidos),
+            " de ", nrow(univ_pos),
+            " (", round(100 * nrow(nao_corrigidos) / nrow(univ_pos), 1), "%)")
+    print(dplyr::count(nao_corrigidos, corr))
+    readr::write_csv(
+      nao_corrigidos |>
+        dplyr::select(dplyr::any_of(c("PROCESSO", "FASE", "ANO", "MES", "NOME_arr",
+                                      "TITULAR", "UM", "QTD_MINERIO", "PESO_KG",
+                                      "VALORarr", "VALORtot", "corr"))) |>
+        dplyr::mutate(mineral = mineral_label, .before = 1),
+      file.path(QA_DIR, paste0("cfem_nao_corrigidos_", tolower(mineral_label), ".csv")))
+  }
+
+  cfem_final
+}
+
+# --- Subset A: 2018+ | faixa [30, 300] R$/kg --------------------------------
+# Respaldo: 51%-94% das declaracoes ja caem nesta faixa SEM correcao alguma.
+# Compativel com referencias externas de 2024 (Sec. Fazenda RO R$107,55/kg;
+# IBAMA ~R$115/kg) e com a serie observada (mediana 41 em 2019 -> 150 em 2026).
+cfem_final <- corrige_cassiterita_ws(
+  cfem_final, pmin_kg = 30, pmax_kg = 300,
+  subset_label = "2018MAIS",
+  filtro_ano   = function(a) a >= ANO_CORTE_CASS
+)
+
+# --- Subset B: ate 2017 | faixa [5, 50] R$/kg -------------------------------
+# ACHADO CENTRAL (auditoria 2026-07-16): a maior parte do dado pre-2018 NAO
+# esta errada -- a faixa [30,300] e que nao se aplica ao periodo. Aplicar
+# [30,300] aqui REPROVAVA dado correto e fabricava correcao (o teste anterior
+# produziu mediana 147 R$/kg no periodo, MAIOR que a de 2018+, absurdo).
+#
+# Evidencia (886559/2004 / COOGER, 2006, linha a linha): 26 de 35 declaracoes
+# dao R$8,69-11,0/kg -- dispersao de 25%, coesa. UM = "T" e a conversao T->kg
+# esta correta (QTD_MINERIO 19,3 -> PESO_KG 19.300). Esses pesos sao reais.
+#
+# Faixa [5,50] derivada da serie modal observada por ano (cluster dominante,
+# nao contaminado):
+#     2006: ~9,0   | 2007: ~15,1 | 2008: ~17,3 | 2009: ~13,8
+#     2010: ~17,0  | 2013: ~25,8 | 2014: ~32,6 | 2017: ~33,4
+#   Range real observado: 8,69 a 37,2 R$/kg -> [5,50] envelopa com folga.
+#
+# LIMITACAO A DOCUMENTAR: a faixa sai dos proprios dados (nao ha serie
+# historica publica de preco de cassiterita). O que a sustenta e (i) a coesao
+# intra-ano dos precos (dispersao 4%-25%), (ii) a suavidade da curva 2006-2026,
+# e (iii) a base amostral pequena (145 decl., 13 processos, 1-6 por ano) ter
+# sido auditada caso a caso -- nao e estimativa cega.
+cfem_final <- corrige_cassiterita_ws(
+  cfem_final, pmin_kg = 5, pmax_kg = 50,
+  subset_label = "ATE2017",
+  filtro_ano   = function(a) a < ANO_CORTE_CASS
+)
 
 # OURO (30.000-1.000.000 R$/kg)
 cfem_final <- corrige_mineral_3checks(cfem_final, "OURO", subs_keep = "OURO", subs_col = "SUBSarrSIM",
                                       pmin_kg = 30 * 1000, pmax_kg = 1000 * 1000, min_med_plaus = 30, max_med_plaus = 1000)
 
+# cfem_correcao_extrema -- sinaliza correcao de peso incerta/agressiva.
+#   OURO (metodo original): 'simples_*' = caiu no fallback sem ancora de
+#     mediana confiavel. Criterio PRESERVADO, inalterado.
+#   CASSITERITA (white solder): nao existe 'simples_*'. Marca-se aqui:
+#     - correcao de 3+ ordens de grandeza (pow10_p-3 ou maior em modulo), e
+#     - dado_corrompido (nenhum fator de 10 reconcilia com a faixa).
 cfem_final <- cfem_final |>
-  dplyr::mutate(cfem_correcao_extrema = as.integer(stringr::str_starts(corr, "simples_")))
+  dplyr::mutate(
+    cfem_correcao_extrema = dplyr::case_when(
+      is.na(corr)                                     ~ 0L,
+      stringr::str_starts(corr, "simples_")           ~ 1L,
+      corr == "dado_corrompido"                       ~ 1L,
+      corr == "sem_quantidade_declarada"              ~ 1L,
+      stringr::str_detect(corr, "^pow10_p-?([3-9]|[1-9][0-9]+)$") ~ 1L,
+      TRUE                                            ~ 0L
+    )
+  )
 
 n_extrema <- sum(cfem_final$cfem_correcao_extrema, na.rm = TRUE)
 message(sprintf("[CFEM] registros marcados como correcao extrema (cfem_correcao_extrema=1): %d", n_extrema))
@@ -659,6 +862,227 @@ cfem_final <- cfem_final |>
 
 save_ckpt(cfem_final,    "05_cfem_final")
 save_ckpt(cfem_aut_amzl, "05_cfem_aut_amzl")
+
+
+
+
+
+
+# ---- CHECKS ----
+# Cassiterita
+cass_check <- cfem_final |>
+  dplyr::filter(SUBSarr == "CASSITERITA", FASE %in% FASES_CORR)
+med_dbg <- compute_median_hierarchical(
+  cass_check, preco_col = "preco_g_orig",
+  min_muni = min_grp_muni, min_state = min_grp_state, min_month = min_grp_month,
+  min_ano = min_grp_ano, min_global = min_grp_global,
+  max_med_plaus = 0.30, min_med_plaus = 0.03
+)
+table(med_dbg$level, useNA = "always")
+
+cfem_final |>
+  dplyr::filter(SUBSarr == "CASSITERITA", FASE %in% FASES_CORR,
+                PESO_KG_final > 0, VALORtot > 0) |>
+  dplyr::mutate(rs_kg = VALORtot / PESO_KG_final) |>
+  dplyr::summarise(
+    n = dplyr::n(),
+    min = min(rs_kg), p25 = quantile(rs_kg, .25), mediana = median(rs_kg),
+    p75 = quantile(rs_kg, .75), max = max(rs_kg)
+  )
+
+# Ouro
+ouro_check <- cfem_final |>
+  dplyr::filter(SUBSarrSIM == "OURO", FASE %in% FASES_CORR)
+med_dbg_ouro <- compute_median_hierarchical(
+  ouro_check, preco_col = "preco_g_orig",
+  min_muni = min_grp_muni, min_state = min_grp_state, min_month = min_grp_month,
+  min_ano = min_grp_ano, min_global = min_grp_global,
+  max_med_plaus = 1000, min_med_plaus = 30
+)
+table(med_dbg_ouro$level, useNA = "always")
+
+cfem_final |>
+  dplyr::filter(SUBSarrSIM == "OURO", FASE %in% FASES_CORR,
+                PESO_KG_final > 0, VALORtot > 0) |>
+  dplyr::mutate(rs_kg = VALORtot / PESO_KG_final) |>
+  dplyr::summarise(
+    n = dplyr::n(),
+    min = min(rs_kg), p25 = quantile(rs_kg, .25), mediana = median(rs_kg),
+    p75 = quantile(rs_kg, .75), max = max(rs_kg)
+  )
+
+# VISUALIZAÇÃO 1 ==============================================================
+df_temporal_unificado <- cfem_final |>
+  dplyr::filter(SUBSarrSIM %in% c("OURO") | SUBSarr == "CASSITERITA") |>
+  dplyr::filter(str_detect(toupper(FASE), "GARIMPEIRA")) |> 
+  dplyr::mutate(
+    substancia_plot = factor(dplyr::if_else(SUBSarr == "CASSITERITA", "CASSITERITA", "OURO"), 
+                             levels = c("CASSITERITA", "OURO")),
+    data = as.Date(sprintf("%04d-%02d-01", ANO, MES))
+  ) |>
+  dplyr::group_by(substancia_plot, data) |>
+  dplyr::summarise(
+    `1. Valor Arrecadado (R$)_Orig`   = sum(VALORarr, na.rm = TRUE),
+    `1. Valor Arrecadado (R$)_Corr`   = sum(VALORarr, na.rm = TRUE),
+    `2. Peso Declarado (Kg)_Orig`     = sum(PESO_KG, na.rm = TRUE),
+    `2. Peso Declarado (Kg)_Corr`     = sum(PESO_KG_final, na.rm = TRUE),
+    `3. Relação (R$/Kg)_Orig` = dplyr::if_else(sum(PESO_KG, na.rm = TRUE) > 0, 
+                                               sum(VALORtot, na.rm = TRUE) / sum(PESO_KG, na.rm = TRUE), 
+                                               NA_real_),
+    `3. Relação (R$/Kg)_Corr` = dplyr::if_else(sum(PESO_KG_final, na.rm = TRUE) > 0, 
+                                               sum(VALORtot, na.rm = TRUE) / sum(PESO_KG_final, na.rm = TRUE), 
+                                               NA_real_),
+    .groups = "drop"
+  ) |>
+  tidyr::pivot_longer(
+    cols = -c(substancia_plot, data),
+    names_to = c("metrica", "cenario"),
+    names_pattern = "(.*)_(Orig|Corr)",
+    values_to = "valor_metrica"
+  ) |>
+  dplyr::mutate(
+    cenario = dplyr::if_else(cenario == "Orig", "Antes (Original)", "Depois (pow10)"),
+    label_cor = dplyr::case_when(
+      str_detect(metrica, "Valor") ~ "Valor Arrecadado (Inalterado)",
+      str_detect(metrica, "Peso") & cenario == "Antes (Original)" ~ "Peso Original",
+      str_detect(metrica, "Peso") & cenario == "Depois (pow10)" ~ "Peso Depois (pow10)",
+      str_detect(metrica, "Relação") & cenario == "Antes (Original)" ~ "Relação R$/kg (original)",
+      str_detect(metrica, "Relação") & cenario == "Depois (pow10)" ~ "Relação R$/kg (depois)"
+    )
+  ) |>
+  dplyr::filter(!is.na(valor_metrica) & valor_metrica > 0)
+
+cores_customizadas <- c(
+  "Valor Arrecadado (Inalterado)" = "#1e3799",
+  "Peso Original"                 = "#e74c3c",
+  "Peso Depois (pow10)"           = "#27ae60",
+  "Relação R$/kg (original)"      = "#e74c3c",
+  "Relação R$/kg (depois)"        = "#8e44ad" 
+)
+
+p_linhas <- ggplot(df_temporal_unificado, aes(x = data, y = valor_metrica, 
+                                          color = label_cor, 
+                                          linetype = cenario, 
+                                          alpha = cenario)) +
+  geom_line(size = 0.8) +
+  geom_point(size = 1.4) +
+  scale_y_log10(labels = scales::label_comma()) +
+  facet_grid(metrica ~ substancia_plot, scales = "free_y") +
+  scale_color_manual(values = cores_customizadas) + 
+  scale_linetype_manual(values = c("Antes (Original)" = "dashed", "Depois (pow10)" = "solid")) + 
+  scale_alpha_manual(values = c("Antes (Original)" = 0.4, "Depois (pow10)" = 1.0)) +            
+  theme_bw() +
+  labs(x = "", y = "Valores em Escala Log10", color = "") +
+  guides(color = guide_legend(title = NULL, nrow = 1), linetype = "none", alpha = "none") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 9),
+    panel.grid.minor = element_blank()
+  )
+
+# [EXPORTAÇÃO 1]
+ggsave(filename = file.path(QA_DIR, "01_serie_temporal_unificada.png"), 
+       plot = p_linhas, width = 11, height = 8.5, dpi = 300)
+
+# VISUALIZAÇÃO 2 ==============================================================
+df_scatterplot_clean <- cfem_final |>
+  dplyr::filter(SUBSarrSIM %in% c("OURO") | SUBSarr == "CASSITERITA") |>
+  dplyr::filter(str_detect(toupper(FASE), "GARIMPEIRA")) |>
+  dplyr::mutate(
+    substancia_plot = factor(dplyr::if_else(SUBSarr == "CASSITERITA", "CASSITERITA", "OURO"), 
+                             levels = c("CASSITERITA", "OURO")),
+    data = as.Date(sprintf("%04d-%02d-01", ANO, MES)),
+    status_ponto = dplyr::if_else(corr == "original", "Dado Original Correto", "Corrigido pelo Algoritmo (pow10)")
+  ) |>
+  dplyr::filter(!is.na(preco_g_orig) & !is.na(preco_g_final) & preco_g_orig > 0 & preco_g_final > 0) |>
+  tidyr::pivot_longer(
+    cols = c(preco_g_orig, preco_g_final),
+    names_to = "cenario",
+    values_to = "preco_individual"
+  ) |>
+  dplyr::mutate(
+    cenario = factor(dplyr::if_else(cenario == "preco_g_orig", "Antes (Original)", "Depois (pow10)"),
+                     levels = c("Antes (Original)", "Depois (pow10)"))
+  )
+
+cores_scatterplot <- c(
+  "Dado Original Correto"           = "#34495e",
+  "Corrigido pelo Algoritmo (pow10)" = "#e74c3c"
+)
+
+p_scatter <- ggplot(df_scatterplot_clean, aes(x = data, y = preco_individual, color = status_ponto)) +
+  geom_point(alpha = 0.4, size = 1.0) +
+  scale_y_log10(labels = scales::label_comma(suffix = " R$/g")) +
+  facet_grid(substancia_plot ~ cenario, scales = "free_y") +
+  scale_color_manual(values = cores_scatterplot) +
+  theme_bw() +
+  labs(x = "", y = "R$/kg (Escala Log10)", color = "") +
+  guides(color = guide_legend(title = NULL, nrow = 1)) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 9),
+    panel.grid.minor = element_blank()
+  )
+# [EXPORTAÇÃO 2]
+ggsave(filename = file.path(QA_DIR, "02_scatterplot_precos.png"), 
+       plot = p_scatter, width = 11, height = 7, dpi = 300)
+
+
+# VISUALIZAÇÃO 3 ==============================================================
+prep_violino <- function(df) {
+  df |>
+    filter(PESO_KG > 0, PESO_KG_final > 0, VALORtot > 0, FASE %in% FASES_CORR) |>
+    mutate(
+      `Antes`  = VALORtot / PESO_KG,
+      `Depois` = VALORtot / PESO_KG_final
+    ) |>
+    pivot_longer(c(Antes, Depois), names_to = "cenario", values_to = "rs_kg") |>
+    mutate(cenario = factor(cenario, levels = c("Antes", "Depois")))
+}
+
+faixa_ref <- function(pmin, pmax) {
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = pmin, ymax = pmax,
+           alpha = 0.08, fill = "forestgreen")
+}
+
+p_violino_cassiterita <- prep_violino(cfem_final |> filter(SUBSarr == "CASSITERITA")) |>
+  ggplot(aes(cenario, rs_kg, fill = cenario)) +
+  faixa_ref(30, 300) +
+  geom_violin(scale = "width", alpha = 0.8, color = NA) +
+  geom_boxplot(width = 0.12, outlier.size = 0.4, alpha = 0.6) +
+  facet_wrap(~ FASE, scales = "free_x", nrow = 1) + 
+  scale_y_log10(labels = scales::comma) +
+  scale_fill_manual(values = c("Antes" = "#e74c3c", "Depois" = "#2D6A4F")) +
+  labs(#title = "Cassiterita — preço implícito (R$/kg) por fase, antes e depois da correção",
+       x = NULL, y = "R$/kg (log)", fill = NULL) +
+  theme_minimal() + 
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", size = 11))
+
+# [EXPORTAÇÃO 3]
+ggsave(filename = file.path(QA_DIR, "03_violino_cassiterita.png"), 
+       plot = p_violino_cassiterita, width = 12, height = 5, dpi = 300)
+
+# VISUALIZAÇÃO 4 ==============================================================
+p_violino_ouro <- prep_violino(cfem_final |> filter(SUBSarrSIM == "OURO")) |>
+  ggplot(aes(cenario, rs_kg, fill = cenario)) +
+  faixa_ref(30000, 1000000) +
+  geom_violin(scale = "width", alpha = 0.8, color = NA) +
+  geom_boxplot(width = 0.12, outlier.size = 0.4, alpha = 0.6) +
+  # O 'nrow = 1' força todas as fases a ficarem lado a lado
+  facet_wrap(~ FASE, scales = "free_x", nrow = 1) + 
+  scale_y_log10(labels = scales::comma) +
+  scale_fill_manual(values = c("Antes" = "#e74c3c", "Depois" = "#1e3799")) +
+  labs(#title = "Ouro — preço implícito (R$/kg) por fase, antes e depois da correção",
+       x = NULL, y = "R$/kg (log)", fill = NULL) +
+  theme_minimal() + 
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", size = 11))
+
+# [EXPORTAÇÃO 4]
+ggsave(filename = file.path(QA_DIR, "04_violino_ouro.png"), 
+       plot = p_violino_ouro, width = 12, height = 5, dpi = 300)
+
 
 # =============================================================================
 # BLOCO 7 — AGREGAÇÕES DA CFEM POR PROCESSO

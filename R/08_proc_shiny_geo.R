@@ -4,13 +4,6 @@
 # Prepara os objetos "gerais" do Shiny (abas 1-3: Tabela / Anual / Mensal):
 # cfem.rds, cfem_anual.rds, cfem_mensal.rds, pma_simpl.rds, ti/uc/qui_simpl.rds
 # e os lookups de filtro encadeado (lk_*_tab1/2/3.rds).
-#
-# Atualizacao do antigo 05_proc_shiny_geo_old.R: MESMA fonte de dados (CSV/SHP
-# publicos em data/result_shiny, ja processados pelo 05_integracao_final.R —
-# decisao do usuario: nao ler direto do checkpoint interno, o CSV/SHP publico
-# e a fonte unica de verdade), MESMA logica de agregacao (nenhuma mudanca de
-# metodologia aqui). Unica mudanca real: path hardcoded "C:/GP/anm-geo"
-# trocado por here::here(), para bater com o padrao do resto do pipeline.
 ################################################################################
 
 rm(list = ls(all.names = TRUE))
@@ -138,19 +131,39 @@ to_wgs84 <- function(x) {
 # do shapefile de origem podem virar GEOMETRYCOLLECTION apos rmapshaper::
 # ms_simplify() — o leaflet::addPolygons() no app.R nao sabe desenhar isso e
 # trava ("Don't know how to get polygon data from object of class
-# XY,GEOMETRYCOLLECTION,sfg"). Lacuna pre-existente (o 05_proc_shiny_geo_old.R
-# tambem nunca aplicou isso) — corrigido aqui porque e exatamente o tipo de
-# problema ja documentado como aprendizado do projeto para shapefiles do
-# IBGE/pipeline.
+# XY,GEOMETRYCOLLECTION,sfg").
+#
+# CORRECAO (achado real, PMA/2026-07): aplicar st_make_valid() em TODAS as
+# geometrias, mesmo nas ja validas, pode destruir geometrias corretas.
+# Confirmado no shapefile do PMA: 54497 de 55415 poligonos ja eram
+# "Valid Geometry" na origem (MULTIPOLYGON), mas ao rodar st_make_valid()
+# em cima de TODAS mesmo assim, 6 delas (todas com area < 0.07 ha — REQ LAVRA
+# GARIMPEIRA/REQ PESQUISA recem-protocolados) viraram GEOMETRYCOLLECTION
+# VAZIA. Efeito colateral conhecido do GEOS por tras do st_make_valid() em
+# poligonos muito pequenos/proximos da tolerancia numerica: ele renoda a
+# geometria mesmo quando nao precisa, e pode colapsa-la. Teste que confirmou
+# (pulando make_valid() nessas 6): permanecem MULTIPOLYGON validos, nrow
+# preservado. Por isso agora so aplicamos st_make_valid() no subconjunto que
+# st_is_valid() de fato aponta como invalido — o resto fica intocado.
 tornar_valido <- function(x) {
-  x <- suppressWarnings(sf::st_make_valid(x))
-  # st_make_valid() em geometrias muito quebradas pode devolver
-  # GEOMETRYCOLLECTION (polígono + fragmentos de linha/ponto residuais).
-  # ms_simplify() so aceita (multi)poligono OU (multi)linha, nao mistura —
-  # todas as 4 camadas aqui (PMA, TI, UC, quilombolas) sao poligonais por
-  # natureza, entao extraimos so a parte poligonal e descartamos o residuo.
-  x <- suppressWarnings(sf::st_collection_extract(x, "POLYGON"))
-  sf::st_make_valid(x)
+  invalidas <- !sf::st_is_valid(x)
+  if (any(invalidas)) {
+    x[invalidas, ] <- suppressWarnings(sf::st_make_valid(x[invalidas, ]))
+  }
+
+  # Só o st_make_valid() acima (aplicado apenas ao subconjunto que era
+  # inválido) pode gerar GEOMETRYCOLLECTION (polígono + fragmentos residuais
+  # de linha/ponto). Isolamos só essas para extrair a parte poligonal —
+  # tudo que já era (multi)polígono válido (a imensa maioria) permanece
+  # intocado, sem passar de novo por st_collection_extract()/st_make_valid().
+  mistas <- sf::st_geometry_type(x) == "GEOMETRYCOLLECTION"
+  if (any(mistas)) {
+    x_intocado <- x[!mistas, ]
+    x_extraido <- suppressWarnings(sf::st_collection_extract(x[mistas, ], "POLYGON"))
+    x_extraido <- sf::st_make_valid(x_extraido)
+    x <- rbind(x_intocado, x_extraido)
+  }
+  x
 }
 
 pma <- sf::st_read(pma_shp_path, quiet = TRUE) |> to_wgs84() |> tornar_valido()
@@ -164,9 +177,19 @@ saveRDS(uc,  file.path(OUTPUT_DIR, "uc.rds"))
 saveRDS(qui, file.path(OUTPUT_DIR, "qui.rds"))
 
 message("[08] simplificando geometrias (rmapshaper)...")
+# CORRECAO (achado real, crash em producao 2026-07): tornar_valido() roda
+# ANTES do ms_simplify() (linha ~431), mas o proprio ms_simplify() pode
+# reintroduzir GEOMETRYCOLLECTION como efeito colateral da simplificacao
+# (comportamento conhecido do mapshaper/rmapshaper — simplificar uma
+# geometria valida pode gerar auto-intersecoes ou fragmentos). O crash
+# reportado ("Don't know how to get polygon data from object of class
+# XY,GEOMETRYCOLLECTION,sfg", em leaflet::addPolygons no app.R) veio do
+# .rds JA simplificado, nao do pma bruto — por isso precisa re-sanear
+# DEPOIS de simplificar tambem, nao so antes.
 simplify_and_save <- function(sf_obj, out_path, keep_ratio) {
   if (nrow(sf_obj) > 0) {
     simplified <- rmapshaper::ms_simplify(sf_obj, keep = keep_ratio, keep_shapes = TRUE)
+    simplified <- tornar_valido(simplified)
     saveRDS(simplified, out_path)
   }
 }
@@ -177,3 +200,119 @@ simplify_and_save(qui, file.path(OUTPUT_DIR, "qui_simpl.rds"), 0.3)
 simplify_and_save(pma, file.path(OUTPUT_DIR, "pma_simpl.rds"), 0.1)
 
 message("\n=== 08_proc_shiny_geo.R — CONCLUIDO ===")
+
+
+
+
+################################################################################
+# checar_rds_antes_deploy.R
+#
+# Checagem robusta de TODOS os .rds em shiny_dashboard antes do scp pro
+# droplet. Roda 100% local, so leitura — nao altera nenhum arquivo.
+#
+# O que detecta:
+#   1) Erro de leitura (arquivo corrompido/ausente)
+#   2) Warnings emitidos durante o readRDS() — pega qualquer warning, incluindo
+#      o "cannot unserialize ALTVEC object... returning length zero vector"
+#      (bug do arrow ALTREP que ja identificamos), sem depender do texto exato
+#      da mensagem continuar igual em versoes futuras do pacote.
+#   3) Checagem ESTRUTURAL independente do warning: compara o tamanho de CADA
+#      coluna com nrow(df). Isso pega o bug mesmo se o R um dia parar de
+#      emitir warning nesse caso — e' o teste que realmente importa, o
+#      warning e so um sintoma.
+#   4) Tabelas com 0 linhas (pode ser esperado ou sintoma de outro problema
+#      upstream — sinalizado, nao tratado como erro automatico).
+################################################################################
+
+pasta <- "C:/GP/anm-geo/shiny_dashboard"   # <-- ajuste aqui se necessario
+
+arquivos_rds <- list.files(pasta, pattern = "\\.rds$", full.names = TRUE)
+
+if (length(arquivos_rds) == 0) {
+  stop("Nenhum .rds encontrado em: ", pasta)
+}
+
+checar_rds <- function(caminho) {
+  nome <- basename(caminho)
+  warnings_capturados <- character(0)
+
+  obj <- withCallingHandlers(
+    tryCatch(readRDS(caminho), error = function(e) e),
+    warning = function(w) {
+      warnings_capturados <<- c(warnings_capturados, conditionMessage(w))
+      invokeRestart("muffleWarning")
+    }
+  )
+
+  if (inherits(obj, "error")) {
+    return(data.frame(arquivo = nome, status = "ERRO_LEITURA",
+                       detalhe = conditionMessage(obj), stringsAsFactors = FALSE))
+  }
+
+  detalhe <- character(0)
+
+  if (length(warnings_capturados) > 0) {
+    detalhe <- c(detalhe, paste0("WARNING NA LEITURA: ", paste(unique(warnings_capturados), collapse = " || ")))
+  }
+
+  if (is.data.frame(obj)) {
+    n <- nrow(obj)
+    tam_colunas <- vapply(obj, length, integer(1))
+
+    colunas_zeradas      <- names(obj)[tam_colunas == 0 & n > 0]
+    colunas_incompativeis <- setdiff(names(obj)[tam_colunas != n], colunas_zeradas)
+
+    if (length(colunas_zeradas) > 0) {
+      detalhe <- c(detalhe, paste0("COLUNA(S) DE TAMANHO 0 (nrow=", n, "): ",
+                                    paste(colunas_zeradas, collapse = ", ")))
+    }
+    if (length(colunas_incompativeis) > 0) {
+      detalhe <- c(detalhe, paste0("COLUNA(S) COM TAMANHO != nrow: ",
+                                    paste(colunas_incompativeis, collapse = ", ")))
+    }
+    if (n == 0) {
+      detalhe <- c(detalhe, "AVISO: 0 linhas (confirmar se e esperado)")
+    }
+
+    # NOVO (achado real, crash em producao 2026-07): objetos sf (pma_simpl,
+    # ti_simpl, uc_simpl, qui_simpl) precisam ser so POLYGON/MULTIPOLYGON —
+    # qualquer outro tipo (GEOMETRYCOLLECTION em especial) faz o
+    # leaflet::addPolygons() do app.R travar a sessao inteira do usuario
+    # ("Don't know how to get polygon data from object..."). Checagem
+    # estrutural (tipo de geometria), no mesmo espirito das checagens acima —
+    # nao depende do texto do erro do leaflet continuar igual no futuro.
+    if (inherits(obj, "sf")) {
+      tipos <- as.character(sf::st_geometry_type(obj))
+      tipos_ok <- c("POLYGON", "MULTIPOLYGON")
+      tipos_ruins <- setdiff(unique(tipos), tipos_ok)
+      if (length(tipos_ruins) > 0) {
+        n_ruins <- sum(tipos %in% tipos_ruins)
+        detalhe <- c(detalhe, paste0("GEOMETRIA INCOMPATIVEL COM leaflet::addPolygons — ",
+                                      n_ruins, " linha(s) do tipo ",
+                                      paste(tipos_ruins, collapse = ", ")))
+      }
+    }
+  } else if (is.list(obj) && length(obj) == 0) {
+    detalhe <- c(detalhe, "LISTA VAZIA")
+  }
+
+  status <- if (length(detalhe) == 0) "OK" else "PROBLEMA"
+  data.frame(arquivo = nome, status = status,
+             detalhe = paste(detalhe, collapse = " | "), stringsAsFactors = FALSE)
+}
+
+resultado <- do.call(rbind, lapply(arquivos_rds, checar_rds))
+
+cat("\n================ RESUMO (", nrow(resultado), "arquivos ) ================\n")
+print(resultado[, c("arquivo", "status")], row.names = FALSE)
+
+problemas <- resultado[resultado$status != "OK", ]
+if (nrow(problemas) > 0) {
+  cat("\n================ DETALHES DOS PROBLEMAS ================\n")
+  for (i in seq_len(nrow(problemas))) {
+    cat("\n->", problemas$arquivo[i], "\n   ", problemas$detalhe[i], "\n")
+  }
+  cat("\n", nrow(problemas), "de", nrow(resultado), "arquivo(s) com problema — NAO subir pro droplet ainda.\n")
+} else {
+  cat("\nTodos os", nrow(resultado), "arquivos passaram limpo. Pode subir pro droplet.\n")
+}

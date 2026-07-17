@@ -2,6 +2,11 @@
 # 04_microdados_relacional.R
 ################################################################################
 
+list.files(here::here("data", "raw_data", "anm_microdados"), recursive = TRUE)
+zip_path <- here::here("data", "raw_data", "anm_microdados", "microdados-scm.zip")
+file.info(zip_path)$size
+utils::unzip(zip_path, list = TRUE) |> head(20)
+
 rm(list = ls(all.names = TRUE))
 options(scipen = 999)
 
