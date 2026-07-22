@@ -839,7 +839,15 @@ segmentos_aptidao_processo <- function(processo_alvo, serie_fase_status, situaca
     # motivo continuam sendo remontados por unir_intervalos() nos wrappers
     # (periodos_nao_apto_processo/periodos_aptidao_processo), entao a
     # granularidade extra aqui nao muda o grafico.
-    if (nrow(intervalos_titulo) == 0) {
+    # AJUSTE (2026-07-21): Concessao de Lavra e por prazo INDETERMINADO --
+    # nunca tem dt_vencimento (nao e falta de dado, e o regime nao ter
+    # prazo). Sem essa isencao, CONC LAV caia sempre em "buraco" (nunca
+    # coberto por intervalos_titulo, que exige dt_vencimento nao-nula) e
+    # aparecia como "vencimento_sem_data_a_revisar" pra sempre -- mesma
+    # causa raiz do achado em 06_serie_temporal.R/titulo_ok_vencimento.
+    if (fase_i %in% "CONC LAV") {
+      titulo_part <- tibble::tibble(xmin = ini, xmax = fim, titulo_valido = TRUE, motivo_titulo = NA_character_)
+    } else if (nrow(intervalos_titulo) == 0) {
       titulo_part <- tibble::tibble(
         xmin = ini, xmax = fim, titulo_valido = FALSE, motivo_titulo = "vencimento_sem_data_a_revisar")
     } else {
@@ -877,14 +885,19 @@ segmentos_aptidao_processo <- function(processo_alvo, serie_fase_status, situaca
       flag_titulo_vencido                       <- identical(tk$motivo_titulo, "titulo_vencido")
       flag_titulo_vencido_renovacao_protocolada <- identical(tk$motivo_titulo, "titulo_vencido_renovacao_protocolada")
 
-      # Cascata original, resultado INTOCADO — mesma ordem de prioridade de
-      # sempre: fase > status > licenca > titulo.
+      # Cascata — fase > status > licenca > titulo. AJUSTE (2026-07-20/21):
+      # renovacao protocolada em dia (art. 211/213), sem indeferimento,
+      # conta como apto -- mora administrativa da ANM nao e irregularidade
+      # do titular. Achado real: 880391/1987, titulo aparecia "vencido" no
+      # historico mesmo com renovacao em dia.
       if (flag_fase_nao_operacional) {
         apto_k <- "em_analise"; motivo_k <- "fase_de_tramitacao_ou_pesquisa"
       } else if (flag_status_nao_ativo) {
         apto_k <- "FALSE"; motivo_k <- "suspensa_ou_encerrada"
       } else if (flag_sem_licenca_ambiental_previa) {
         apto_k <- "FALSE"; motivo_k <- "sem_licenca_ambiental_previa"
+      } else if (!tk$titulo_valido && identical(tk$motivo_titulo, "titulo_vencido_renovacao_protocolada")) {
+        apto_k <- "TRUE"; motivo_k <- NA_character_
       } else if (!tk$titulo_valido) {
         apto_k <- "FALSE"; motivo_k <- tk$motivo_titulo
       } else {

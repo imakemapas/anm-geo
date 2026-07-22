@@ -228,7 +228,7 @@ if (nrow(pma6) > 0) {
 pma7sf <- if (nrow(pma6) > 0) rbind(pma5, pma6_resolved) else pma5
 pma7   <- terra::vect(pma7sf)
 
-# Informação suplementar do SCM (não sobrescreve FASE/TITULAR/SUBS do PMA).
+# Informação suplementar do SCM
 cm_attrs <- cm_unique |> dplyr::select(PROCESSO, TIPO_REQcm, CPF_CNPJcm)
 pma_cm   <- tidyterra::left_join(pma7, cm_attrs, by = "PROCESSO")
 

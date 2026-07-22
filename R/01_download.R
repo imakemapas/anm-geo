@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
 ROOT      <- here::here()
 RAW_DIR   <- here::here("data", "raw_data")
 
-source(here::here("R", "utils.R"))  # download_file, download_named_urls, sha256_file, hash_anterior
+source(here::here("R", "utils.R"))
 
 dir.create(MANIFEST_DIR, recursive = TRUE, showWarnings = FALSE)
 
@@ -102,11 +102,8 @@ anm_targets <- purrr::imap(config_anm, \(cfg, name) {
 # Config: GEO (protected lands + enforcement) ----------------------------------
 config_geo <- list(
 
-  # --- TERRITORIOS (TI + UC + QUI): atualizacao lenta, fontes instaveis -------
-  # Suspenso em 2026-07-14: MMA fora do ar (periodo de defeso). Fontes mudam
-  # raramente (limite/cadastro, nao transacional) -- sem prejuizo em manter
-  # parado ate dezembro, apos eleicoes. Reativar removendo o comentario do
-  # bloco abaixo E da linha correspondente em geo_targets.
+  # --- Territórios ------------------------------------------------------------
+
   # territorios = list(
   #   dest = "geo_territorios",
   #   urls = c(
@@ -130,14 +127,15 @@ config_geo <- list(
     urls = c(
       "adm_embargos_ibama_a.zip" =
         "https://ftp-pamgia.ibama.gov.br/dados/adm_embargos_ibama_a.zip",
+
+      # "ibama_embargos_a.zip" =
+      #   "https://ftp-pamgia.ibama.gov.br/dados/ibama_embargos_a.zip",
+
       "ibama_autos_de_infracao_p.zip" =
-        "https://ftp-pamgia.ibama.gov.br/dados/ibama_autos_de_infracao_p.zip",
-      "ibama_embargos_a.zip" =
-        "https://ftp-pamgia.ibama.gov.br/dados/ibama_embargos_a.zip",
-      "ctf_brasil.zip" =
-        "https://ftp-pamgia.ibama.gov.br/dados/ctf-app/shp/Brasil.zip",
-      "auto_infracao_csv.zip" =
-        "https://dadosabertos.ibama.gov.br/dados/SIFISC/auto_infracao/auto_infracao/auto_infracao_csv.zip"
+        "https://ftp-pamgia.ibama.gov.br/dados/ibama_autos_de_infracao_p.zip"#,
+
+      # "auto_infracao_csv.zip" =
+      #   "https://dadosabertos.ibama.gov.br/dados/SIFISC/auto_infracao/auto_infracao/auto_infracao_csv.zip"
     )
   ),
 
@@ -147,8 +145,9 @@ config_geo <- list(
     urls = c(
       "embargos_icmbio.zip" =
         "https://www.gov.br/icmbio/pt-br/dados-icmbio/dados_geoespaciais/mapa-tematico-e-dados-geoestatisticos-das-unidades-de-conservacao-federais/embargos_icmbio_shp.zip",
+      
       "autos_infracao_icmbio.zip" =
-        "https://www.gov.br/icmbio/pt-br/dados-icmbio/dados_geoespaciais/mapa-tematico-e-dados-geoestatisticos-das-unidades-de-conservacao-federais/autos_infracao_shp.zip"
+        "https://www.gov.br/icmbio/pt-br/dados-icmbio/dados_geoespaciais/mapa-tematico-e-dados-geoestatisticos-das-unidades-de-conservacao-federais/autos_infracao_icmbio_shp.zip"
     )
   ),
 
@@ -177,7 +176,9 @@ geo_targets <- list(
 )
 
 # Run all targets --------------------------------------------------------------
+
 targets <- c(anm_targets, geo_targets)
+
 #targets <- if (SKIP_ANM) geo_targets else c(anm_targets, geo_targets)
 
 # Timestamp
@@ -197,10 +198,9 @@ if (length(erros) > 0) {
   message("\n ATTENTION: ", length(erros), " download(s) failed.")
   purrr::walk(erros, ~ message(.x$filename))
 
-  tentar_denovo <- readline(prompt = "Would you like to try downloading these errors now?? (y/n): ")
+  tentar_de_novo <- readline(prompt = "Would you like to try downloading these errors now?? (y/n): ")
 
-  if (tolower(tentar_denovo) == "y") {
-    # Reprocessa só os que falharam
+  if (tolower(tentar_de_novo) == "y") {
     retries <- purrr::map(erros, ~ {
       r <- download_file(url = .x$url, dest_dir = .x$dest_dir, filename = .x$filename)
       list(
@@ -225,39 +225,8 @@ if (length(erros) > 0) {
 # --- Resumo final: o que continua falhando apos eventual retry --------------
 erros_finais <- purrr::keep(todos_arquivos, ~ .x$success == FALSE)
 if (length(erros_finais) > 0) {
-  message("\n RESUMO FINAL: ", length(erros_finais), " arquivo(s) continuam com falha:")
+  message("\n Ocorreram: ", length(erros_finais), " arquivo(s) continuam com falha:")
   purrr::walk(erros_finais, ~ message(" - [", .x$target, "] ", .x$filename))
 } else {
-  message("\nRESUMO FINAL: todos os arquivos foram baixados com sucesso.")
+  message("\nTodos os arquivos foram baixados com sucesso.")
 }
-
-# --- Manifest desta execução --------------------------------------------------
-manifest_df <- purrr::map_dfr(todos_arquivos, \(r) {
-  hash_ant <- hash_anterior(r$dest_dir, r$filename, manifests = manifests_anteriores)
-  tibble::tibble(
-    timestamp_execucao = TS_EXECUCAO,
-    target              = r$target,
-    filename            = r$filename,
-    url                 = r$url,
-    dest_dir            = r$dest_dir,
-    success             = r$success,
-    sha256              = r$sha256,
-    sha256_anterior     = hash_ant,
-    mudou               = dplyr::case_when(
-      is.na(hash_ant) | is.na(r$sha256) ~ NA,
-      hash_ant == r$sha256               ~ FALSE,
-      TRUE                                ~ TRUE
-    ),
-    size_bytes          = r$size_bytes,
-    attempts_used       = r$attempts_used,
-    note                = r$note
-  )
-})
-
-manifest_path <- file.path(MANIFEST_DIR, paste0("download_log_", TS_EXECUCAO, ".csv"))
-readr::write_csv(manifest_df, manifest_path)
-
-n_mudaram <- sum(manifest_df$mudou, na.rm = TRUE)
-n_novos   <- sum(is.na(manifest_df$mudou))
-message("Arquivos com conteúdo alterado desde a última execução: ", n_mudaram)
-message("Arquivos novos: ", n_novos)

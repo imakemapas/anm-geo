@@ -28,6 +28,7 @@ RAW_DIR      <- here::here("data", "raw_data")
 PRE_PROC_DIR <- here::here("data", "pre_proc_data")
 MICRO_OUT_DIR <- here::here("data", "result_db", "microdados")  # parquets do 04
 QA_DIR       <- here::here("data", "_qa", "05_integracao_final")
+QA_DIR_CORR  <- here::here("data", "_qa", "correcao_pontual_cfem")
 
 RESULT_SHINY <- here::here("data", "result_shiny")
 RESULT_GEE   <- here::here("data", "result_gee")
@@ -36,7 +37,7 @@ RESULT_DB    <- here::here("data", "result_db")
 MUNI_DIR  <- here::here("data", "raw_data", "BR_Municipios_2025")
 BIOMA_DIR <- here::here("data", "raw_data", "Biomas_250mil")
 
-for (d in c(RESULT_SHINY, RESULT_GEE, RESULT_DB, QA_DIR)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+for (d in c(RESULT_SHINY, RESULT_GEE, RESULT_DB, QA_DIR, QA_DIR_CORR)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
 
 get_mode <- function(x) {
   x <- x[!is.na(x)]
@@ -50,7 +51,6 @@ get_mode <- function(x) {
 # =============================================================================
 
 pma_amzl <- load_ckpt("03_pma_amzl")
-
 proc_mun <- arrow::read_parquet(file.path(MICRO_OUT_DIR, "micro_processo_municipio.parquet"))
 muni_lk  <- arrow::read_parquet(file.path(MICRO_OUT_DIR, "micro_municipio.parquet"))
 muni_lk2 <- muni_lk |>
@@ -378,6 +378,8 @@ cfem_arr_amzl0 <- cfem_arr |>
   dplyr::filter(PROCESSO %in% processos_amzl) |>
   dplyr::mutate(row_id = dplyr::row_number())
 
+names(cfem_arr_amzl0)
+
 cfem_aut_amzl <- cfem_aut |> dplyr::filter(PROCESSO %in% processos_amzl)
 
 fatores_kg <- c("KG" = 1, "T" = 1000, "G" = 0.001, "CT" = 0.0002)
@@ -499,6 +501,8 @@ FASES_CORR <- FASES_CORR_PADRAO
 cfem_final <- cfem_arr_amzl3 |>
   dplyr::mutate(PESO_G_final = PESO_G, PESO_KG_final = PESO_KG, preco_g_final = preco_g_orig, corr = "original")
 
+names(cfem_final)
+
 fatores_simples <- 10^(-6:6)
 corrige_simples_g <- function(peso_g, valortot, pmin_g, pmax_g) {
   if (is.na(peso_g) || is.na(valortot) || peso_g <= 0 || valortot <= 0) return(c(peso = peso_g, fator = NA_real_))
@@ -609,37 +613,20 @@ corrige_mineral_3checks <- function(cfem_final, mineral_label, subs_keep, subs_c
   cfem_final
 }
 
+names(cfem_final)
+
 # ============================================================================
 # CASSITERITA -- correcao por fator de 10 contra faixa absoluta
 # ("metodo white solder", validado em investigacao_white_solder.R)
-#
-# SUBSTITUI corrige_mineral_3checks() APENAS PARA CASSITERITA.
-# O OURO segue inalterado na funcao original (mediana hierarquica + fallback).
-# FASES_CORR / FASES_CORR_PADRAO nao sao alterados -- a cassiterita passa a
-# usar seu proprio vetor (FASES_CASS) abaixo.
-#
-# --- POR QUE MUDOU (diagnostico 2026-07-16, dados pre-correcao) -------------
-#   A mediana hierarquica falhava em massa nesta substancia. No processo
-#   886559/2004 (COOGER/RO), 48 de 100 declaracoes caiam no fallback
-#   'simples_1e-1'. Um fallback que dispara em ~50% dos casos nao e fallback.
-#
-#   Causa raiz: suggest_weight_row() escolhe o fator que MINIMIZA a distancia
-#   a mediana do grupo (which.min(dist_rel)) -- SEM exigir que o resultado
-#   caia na faixa plausivel. Com a mediana contaminada, ele "corrige" para
-#   fora da faixa e ainda marca como pow10_p*, que parece correcao de boa
-#   qualidade.
-#
+
 #   Este metodo inverte a ordem: filtra PRIMEIRO os fatores que garantem
 #   preco dentro de [pmin_kg, pmax_kg], e so entao escolhe o mais conservador
 #   (menor |log10(fator)|). E impossivel produzir resultado fora da faixa --
 #   ou corrige direito, ou marca dado_corrompido.
 #
-# --- ESCOPO (decisao metodologica, registrada) ------------------------------
 #   Fases (FASES_CASS): PLG + REQ PLG + AUT PESQUISA.
 #     Exclui CONCESSAO DE LAVRA (mineracao industrial), que dominava a serie
-#     pre-2018 e tem estrutura de preco distinta do garimpo. Consequencia:
-#     cassiterita em CONCESSAO DE LAVRA deixa de ser corrigida (corr fica
-#     "original"). Mudanca de comportamento consciente.
+#     pre-2018 e tem estrutura de preco distinta do garimpo.
 #
 #   Dois subsets, MESMA faixa [30,300], processados SEPARADAMENTE:
 #     A) ANO >= 2018 -- faixa com respaldo empirico: 51%-94% das declaracoes
@@ -648,15 +635,7 @@ corrige_mineral_3checks <- function(cfem_final, mineral_label, subs_keep, subs_c
 #        2025:94,4% / 2026:89,1%).
 #     B) ANO <= 2017 -- mesma faixa aplicada, mas aderencia observada de 0%
 #        em 2006/2007/2008/2010/2012/2015 (n=145 no total, 7,5% da base).
-#        Resultado esperado: alta taxa de dado_corrompido. Mantido no output
-#        como EVIDENCIA de que o periodo nao reconcilia com a faixa -- NAO
-#        como correcao confiavel. Analisar separadamente.
-#
-#   O corte em 2018 e EMPIRICO (salto de densidade e de aderencia a faixa),
-#   nao economico. Nao foi encontrada serie historica publica de preco de
-#   cassiterita que permitisse ancorar faixas por periodo; referencias
-#   pontuais de 2024 (Sec. Fazenda RO: R$107,55/kg; IBAMA: ~R$115/kg) sao
-#   compativeis com [30,300] mas nao cobrem o historico.
+#        Resultado esperado: alta taxa de dado_corrompido.
 # ============================================================================
 
 FASES_CASS <- c(
@@ -673,13 +652,7 @@ ANO_CORTE_CASS <- 2018
 #   motivo 1 = dado_corrompido          -> nenhum fator de 10 reconcilia
 #   motivo 2 = resolvido
 #   motivo 3 = sem_quantidade_declarada -> QTD_MINERIO == 0 na origem
-#
-# ACHADO (auditoria 2026-07-16, processo 886559/2004 / COOGER, ano 2006):
-# 9 declaracoes tem QTD_MINERIO == 0 na fonte -- CFEM recolhida sem
-# quantidade de minerio declarada. O peso resultante e forcado a um valor
-# minimo (1 kg) em algum ponto a montante, e VALORtot/1 explode o preco
-# (R$490, R$5.363, R$11.920/kg). Isso NAO e erro de unidade: nenhum fator
-# de 10 conserta uma quantidade zero (0 * 10^n = 0). Marcar, nao corrigir.
+
 ws_fator_10 <- function(peso_g, valortot, pmin_g, pmax_g, qtd_minerio = NA_real_) {
   if (!is.na(qtd_minerio) && qtd_minerio == 0) {
     return(c(fator = NA_real_, motivo = 3))
@@ -722,8 +695,6 @@ corrige_cassiterita_ws <- function(cfem_final, pmin_kg = 30, pmax_kg = 300,
     ) |>
     dplyr::ungroup() |>
     dplyr::mutate(
-      # Peso so e alterado quando ha fator valido. Nos casos nao resolvidos
-      # (motivo 0/1/3) o peso ORIGINAL e preservado -- nunca inventamos numero.
       PESO_G_ws  = dplyr::if_else(!is.na(fator), PESO_G * fator, PESO_G),
       PESO_KG_ws = PESO_G_ws / 1000,
       preco_g_ws = dplyr::if_else(!is.na(PESO_G_ws) & PESO_G_ws > 0,
@@ -776,54 +747,39 @@ corrige_cassiterita_ws <- function(cfem_final, pmin_kg = 30, pmax_kg = 300,
 
   cfem_final
 }
+names(cfem_final)
 
 # --- Subset A: 2018+ | faixa [30, 300] R$/kg --------------------------------
-# Respaldo: 51%-94% das declaracoes ja caem nesta faixa SEM correcao alguma.
-# Compativel com referencias externas de 2024 (Sec. Fazenda RO R$107,55/kg;
-# IBAMA ~R$115/kg) e com a serie observada (mediana 41 em 2019 -> 150 em 2026).
 cfem_final <- corrige_cassiterita_ws(
   cfem_final, pmin_kg = 30, pmax_kg = 300,
   subset_label = "2018MAIS",
   filtro_ano   = function(a) a >= ANO_CORTE_CASS
 )
 
+names(cfem_final)
+
 # --- Subset B: ate 2017 | faixa [5, 50] R$/kg -------------------------------
-# ACHADO CENTRAL (auditoria 2026-07-16): a maior parte do dado pre-2018 NAO
-# esta errada -- a faixa [30,300] e que nao se aplica ao periodo. Aplicar
-# [30,300] aqui REPROVAVA dado correto e fabricava correcao (o teste anterior
-# produziu mediana 147 R$/kg no periodo, MAIOR que a de 2018+, absurdo).
-#
-# Evidencia (886559/2004 / COOGER, 2006, linha a linha): 26 de 35 declaracoes
-# dao R$8,69-11,0/kg -- dispersao de 25%, coesa. UM = "T" e a conversao T->kg
-# esta correta (QTD_MINERIO 19,3 -> PESO_KG 19.300). Esses pesos sao reais.
-#
-# Faixa [5,50] derivada da serie modal observada por ano (cluster dominante,
-# nao contaminado):
-#     2006: ~9,0   | 2007: ~15,1 | 2008: ~17,3 | 2009: ~13,8
-#     2010: ~17,0  | 2013: ~25,8 | 2014: ~32,6 | 2017: ~33,4
-#   Range real observado: 8,69 a 37,2 R$/kg -> [5,50] envelopa com folga.
-#
-# LIMITACAO A DOCUMENTAR: a faixa sai dos proprios dados (nao ha serie
-# historica publica de preco de cassiterita). O que a sustenta e (i) a coesao
-# intra-ano dos precos (dispersao 4%-25%), (ii) a suavidade da curva 2006-2026,
-# e (iii) a base amostral pequena (145 decl., 13 processos, 1-6 por ano) ter
-# sido auditada caso a caso -- nao e estimativa cega.
 cfem_final <- corrige_cassiterita_ws(
   cfem_final, pmin_kg = 5, pmax_kg = 50,
   subset_label = "ATE2017",
   filtro_ano   = function(a) a < ANO_CORTE_CASS
 )
 
+cfem_final |>
+  dplyr::filter(PROCESSO %in% c("886443/2007", "850580/2018", "886081/2010"),
+                SUBSarr == "CASSITERITA") |>
+  dplyr::select(PROCESSO, ANO, MES, FASE, corr, PESO_G, VALORtot, preco_g_final) |>
+  dplyr::mutate(dentro_fase_cass = FASE %in% FASES_CASS) |>
+  print(n = 200)
+
+names(cfem_final)
+
 # OURO (30.000-1.000.000 R$/kg)
 cfem_final <- corrige_mineral_3checks(cfem_final, "OURO", subs_keep = "OURO", subs_col = "SUBSarrSIM",
                                       pmin_kg = 30 * 1000, pmax_kg = 1000 * 1000, min_med_plaus = 30, max_med_plaus = 1000)
 
+                                      
 # cfem_correcao_extrema -- sinaliza correcao de peso incerta/agressiva.
-#   OURO (metodo original): 'simples_*' = caiu no fallback sem ancora de
-#     mediana confiavel. Criterio PRESERVADO, inalterado.
-#   CASSITERITA (white solder): nao existe 'simples_*'. Marca-se aqui:
-#     - correcao de 3+ ordens de grandeza (pow10_p-3 ou maior em modulo), e
-#     - dado_corrompido (nenhum fator de 10 reconcilia com a faixa).
 cfem_final <- cfem_final |>
   dplyr::mutate(
     cfem_correcao_extrema = dplyr::case_when(
@@ -860,13 +816,9 @@ cfem_final <- cfem_final |>
   ) |>
   dplyr::select(-munic_pma, -uf_pma, -muni_falta, -preencheu_pma)
 
+names(cfem_final)
 save_ckpt(cfem_final,    "05_cfem_final")
 save_ckpt(cfem_aut_amzl, "05_cfem_aut_amzl")
-
-
-
-
-
 
 # ---- CHECKS ----
 # Cassiterita
@@ -1091,25 +1043,161 @@ ggsave(filename = file.path(QA_DIR, "04_violino_ouro.png"),
 cfem_final <- load_ckpt("05_cfem_final")
 pma_tp     <- load_ckpt("05_pma_tp")
 
-arr_corr_unique <- cfem_final |>
-  dplyr::arrange(PROCESSO, ANO, MES) |>
-  dplyr::group_by(PROCESSO) |>
+cfem_final <- cfem_final |>
+  dplyr::mutate(
+    tipo_caso = dplyr::case_when(
+      corr == "sem_quantidade_declarada" ~ "sem_quantidade",
+      corr == "dado_corrompido"          ~ "nao_reconciliavel",
+      TRUE                               ~ "correcao_aplicada"
+    ),
+    resolvido = tipo_caso == "correcao_aplicada",
+    PESO_KG_final_limpo = dplyr::if_else(resolvido, PESO_KG_final, NA_real_),
+    PESO_G_final_limpo  = dplyr::if_else(resolvido, PESO_G_final,  NA_real_),
+    foco = categorizar_foco(SUBSarr, SUBSarrSIM)
+  )
+save_ckpt(cfem_final, "05_cfem_final")
+
+# --- Agregacao por processo x foco -------------------------------------------
+
+# Um processo que declara CFEM em 2-3 focos (ex: registrado
+# CASSITERITA no PMA mas tambem declara ILMENITA/OURO) vira 2-3 linhas aqui,
+# cada uma com o peso/valor SO daquele foco -- sem misturar substancias de
+# magnitude completamente diferente no mesmo numero.
+
+# --- Separar processos com 1 foco vs 2-3 focos (decisao 2026-07-20) --------
+n_foco_por_processo <- cfem_final |>
+  dplyr::distinct(PROCESSO, foco) |>
+  dplyr::count(PROCESSO, name = "n_foco_distintos")
+
+cfem_final <- cfem_final |>
+  dplyr::left_join(n_foco_por_processo, by = "PROCESSO")
+
+cfem_single <- cfem_final |> dplyr::filter(n_foco_distintos == 1)
+cfem_multi  <- cfem_final |> dplyr::filter(n_foco_distintos > 1)
+
+message(sprintf(
+  "[05][foco] processos com 1 substancia (CFEM): %d | com 2-3 substancias: %d",
+  dplyr::n_distinct(cfem_single$PROCESSO), dplyr::n_distinct(cfem_multi$PROCESSO)
+))
+
+# --- Funcao de agregacao por PROCESSO x foco --------------------------------
+agrega_por_processo_foco <- function(df) {
+  df |>
+    dplyr::arrange(PROCESSO, ANO, MES) |>
+    dplyr::group_by(PROCESSO, foco) |>
+    dplyr::summarise(
+      cfem_arr  = 1L,
+      arr_kg_T  = sum(PESO_KG_final_limpo, na.rm = TRUE),
+      arr_kg_L  = dplyr::if_else(all(is.na(PESO_KG_final_limpo)), NA_real_, dplyr::last(na.omit(PESO_KG_final_limpo))),
+      arr_g_T   = sum(PESO_G_final_limpo,  na.rm = TRUE),
+      arr_g_L   = dplyr::if_else(all(is.na(PESO_G_final_limpo)),  NA_real_, dplyr::last(na.omit(PESO_G_final_limpo))),
+      arr_val_T = sum(VALORarr, na.rm = TRUE),
+      arr_val_L = dplyr::if_else(all(is.na(VALORarr)), NA_real_, dplyr::last(na.omit(VALORarr))),
+      arr_dt_F  = as.character(min(data, na.rm = TRUE)),
+      arr_dt_L  = as.character(max(data, na.rm = TRUE)),
+      arr_ndcl  = dplyr::n(),
+      arr_nbuy  = dplyr::n_distinct(CPF_CNPJarr, na.rm = TRUE),
+      arr_topb  = get_mode(NOME_arr),
+      # --- transparencia: o que ficou de fora do total limpo acima ---------
+      n_dado_corrompido = sum(tipo_caso == "nao_reconciliavel"),
+      n_sem_quantidade  = sum(tipo_caso == "sem_quantidade"),
+      kg_excluido       = sum(PESO_KG[!resolvido], na.rm = TRUE),
+      tem_dado_problema = as.integer(n_dado_corrompido > 0 | n_sem_quantidade > 0),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(dplyr::across(dplyr::where(is.numeric), ~ round(.x, 2)))
+}
+
+arr_corr_long <- dplyr::bind_rows(
+  agrega_por_processo_foco(cfem_single),
+  agrega_por_processo_foco(cfem_multi)
+)
+
+arr_corr_pma <- arr_corr_long |>
+  dplyr::select(PROCESSO, foco, cfem_arr, arr_kg_T, arr_kg_L, arr_g_T, arr_g_L,
+                arr_val_T, arr_val_L, arr_dt_F, arr_dt_L, arr_ndcl, arr_nbuy, arr_topb)
+
+arr_corr_qa_foco <- arr_corr_long |>
+  dplyr::select(PROCESSO, foco, n_dado_corrompido, n_sem_quantidade, kg_excluido, tem_dado_problema)
+
+readr::write_csv(arr_corr_qa_foco, file.path(QA_DIR_CORR, "problemas_por_processo_foco.csv"))
+message(sprintf("[05][auditoria] problemas_por_processo_foco.csv: %d linhas (processo x foco)", nrow(arr_corr_qa_foco)))
+
+# =============================================================================
+# AUDITORIA DA CORRECAO PONTUAL DE CFEM
+# =============================================================================
+message("[05][auditoria] gerando log de correcao pontual (antigo 05b)...")
+
+extremos <- cfem_final |>
+  dplyr::filter(cfem_correcao_extrema == 1) |>
+  dplyr::mutate(
+    fator_correcao = dplyr::if_else(
+      !is.na(PESO_KG) & PESO_KG > 0 & resolvido,
+      PESO_KG_final / PESO_KG, NA_real_),
+    expoente_10     = round(log10(fator_correcao)),
+    direcao         = dplyr::case_when(
+      tipo_caso == "sem_quantidade"     ~ "sem_quantidade",
+      tipo_caso == "nao_reconciliavel"  ~ "nao_reconciliavel",
+      is.na(expoente_10)                ~ NA_character_,
+      expoente_10 < 0                   ~ "dividir",
+      expoente_10 > 0                   ~ "multiplicar",
+      TRUE                               ~ "nenhum"
+    ),
+    casas_decimais  = abs(expoente_10)
+  )
+
+log_correcao_pontual <- extremos |>
+  dplyr::select(PROCESSO, SUBSarr, tipo_caso, CPF_CNPJarr, NOME_arr, ANO, MES, UM,
+                QTD_MINERIO, PESO_KG, PESO_KG_final, fator_correcao,
+                expoente_10, direcao, casas_decimais,
+                preco_g_orig, preco_g_final, corr) |>
+  dplyr::arrange(SUBSarr, tipo_caso, dplyr::desc(casas_decimais))
+readr::write_csv(log_correcao_pontual, file.path(QA_DIR_CORR, "log_correcao_pontual_cfem.csv"))
+
+resumo_expoente <- extremos |> dplyr::count(SUBSarr, tipo_caso, direcao, expoente_10, sort = TRUE)
+readr::write_csv(resumo_expoente, file.path(QA_DIR_CORR, "resumo_expoente.csv"))
+
+moda_expoente <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(NA_character_)
+  tb <- sort(table(x), decreasing = TRUE)
+  names(tb)[1]
+}
+
+resumo_declarante <- extremos |>
+  dplyr::group_by(SUBSarr, CPF_CNPJarr, NOME_arr) |>
   dplyr::summarise(
-    cfem_arr  = 1L,
-    arr_kg_T  = sum(PESO_KG_final, na.rm = TRUE),
-    arr_kg_L  = dplyr::if_else(all(is.na(PESO_KG_final)), NA_real_, dplyr::last(na.omit(PESO_KG_final))),
-    arr_g_T   = sum(PESO_G_final,  na.rm = TRUE),
-    arr_g_L   = dplyr::if_else(all(is.na(PESO_G_final)),  NA_real_, dplyr::last(na.omit(PESO_G_final))),
-    arr_val_T = sum(VALORarr, na.rm = TRUE),
-    arr_val_L = dplyr::if_else(all(is.na(VALORarr)), NA_real_, dplyr::last(na.omit(VALORarr))),
-    arr_dt_F  = as.character(min(data, na.rm = TRUE)),
-    arr_dt_L  = as.character(max(data, na.rm = TRUE)),
-    arr_ndcl  = dplyr::n(),
-    arr_nbuy  = dplyr::n_distinct(CPF_CNPJarr, na.rm = TRUE),
-    arr_topb  = get_mode(NOME_arr),
+    n_registros           = dplyr::n(),
+    n_corr_aplicada       = sum(tipo_caso == "correcao_aplicada", na.rm = TRUE),
+    n_nao_reconciliavel   = sum(tipo_caso == "nao_reconciliavel", na.rm = TRUE),
+    n_sem_quantidade      = sum(tipo_caso == "sem_quantidade", na.rm = TRUE),
+    n_expoentes_distintos = dplyr::n_distinct(expoente_10, na.rm = TRUE),
+    expoente_predominante = moda_expoente(expoente_10),
     .groups = "drop"
   ) |>
-  dplyr::mutate(dplyr::across(dplyr::where(is.numeric), ~ round(.x, 2)))
+  dplyr::arrange(dplyr::desc(n_registros))
+readr::write_csv(resumo_declarante, file.path(QA_DIR_CORR, "resumo_declarante.csv"))
+
+message(sprintf("[05][auditoria] registros no log de auditoria: %d", nrow(log_correcao_pontual)))
+
+# --- Cassiterita nao corrigida
+cassiterita_nao_corrigida_proc <- cfem_final |>
+  dplyr::filter(SUBSarr == "CASSITERITA", tipo_caso %in% c("nao_reconciliavel", "sem_quantidade")) |>
+  dplyr::group_by(PROCESSO) |>
+  dplyr::summarise(
+    n_declaracoes_problema = dplyr::n(),
+    n_nao_reconciliavel    = sum(tipo_caso == "nao_reconciliavel"),
+    n_sem_quantidade       = sum(tipo_caso == "sem_quantidade"),
+    anos_afetados          = paste(sort(unique(ANO)), collapse = ";"),
+    kg_original_total      = round(sum(PESO_KG, na.rm = TRUE), 2),
+    valor_total            = round(sum(VALORtot, na.rm = TRUE), 2),
+    .groups = "drop"
+  )
+readr::write_csv(cassiterita_nao_corrigida_proc, file.path(QA_DIR_CORR, "cassiterita_nao_corrigida.csv"))
+message(sprintf("[05][auditoria] cassiterita_nao_corrigida.csv: %d processos afetados",
+                nrow(cassiterita_nao_corrigida_proc)))
+
+message("\n=== auditoria de correcao pontual (antigo 05b) — CONCLUIDA ===\n")
 
 pma_tp <- pma_tp |>
   dplyr::mutate(
@@ -1128,8 +1216,8 @@ aut_unique <- cfem_aut_amzl |>
   dplyr::summarise(cfem_aut = 1L, aut_val_T = round(sum(VALORaut, na.rm = TRUE), 2), aut_n = dplyr::n(), .groups = "drop")
 
 pma_full <- pma_tp |>
-  tidyterra::left_join(arr_corr_unique, by = "PROCESSO") |>
-  tidyterra::left_join(aut_unique,      by = "PROCESSO") |>
+  tidyterra::left_join(arr_corr_pma, by = "PROCESSO") |>
+  tidyterra::left_join(aut_unique,   by = "PROCESSO") |>
   dplyr::mutate(
     cfem_arr  = tidyr::replace_na(cfem_arr, 0L),
     cfem_aut  = tidyr::replace_na(cfem_aut, 0L),
@@ -1141,8 +1229,29 @@ pma_full <- pma_tp |>
     aut_val_T = tidyr::replace_na(aut_val_T, 0),
     aut_n     = tidyr::replace_na(aut_n, 0L)
   )
+# NOTA (2026-07-20): pma_tp tem 1 linha/processo; arr_corr_pma tem 1 linha
+# por PROCESSO x foco (1 a 3). O left_join acima duplica naturalmente a
+# geometria/atributos do poligono para cada foco declarado -- e o motivo de
+# querermos "1 linha por poligono x substancia". Processo sem CFEM nenhum
+# fica com 1 linha so, foco = NA (nao ha declaracao pra classificar).
 
 save_ckpt(pma_full, "05_pma_full")
+
+# --- Cassiterita nao corrigida: export SHP (1 linha/processo, com geometria) -
+if (nrow(cassiterita_nao_corrigida_proc) > 0) {
+  pma_cassiterita_nao_corrigida <- pma_full |>
+    dplyr::filter(PROCESSO %in% cassiterita_nao_corrigida_proc$PROCESSO) |>
+    dplyr::distinct(PROCESSO, .keep_all = TRUE) |>
+    dplyr::select(PROCESSO, TITULAR, FASE, SUBS, AREA_HA) |>
+    tidyterra::left_join(cassiterita_nao_corrigida_proc, by = "PROCESSO")
+
+  terra::writeVector(pma_cassiterita_nao_corrigida,
+                      file.path(QA_DIR_CORR, "cassiterita_nao_corrigida.shp"), overwrite = TRUE)
+  message(sprintf("[05][auditoria] cassiterita_nao_corrigida.shp: %d poligonos",
+                  nrow(pma_cassiterita_nao_corrigida)))
+} else {
+  message("[05][auditoria] cassiterita_nao_corrigida: nenhum processo afetado -- shp nao gerado.")
+}
 
 # =============================================================================
 # BLOCO 8 — EXPORTS (result_shiny / result_gee / result_db)
@@ -1156,7 +1265,7 @@ uc_amzl       <- load_ckpt("03_uc_amzl")
 qui_amzl      <- load_ckpt("03_qui_amzl")
 
 # SHINY
-terra::writeVector(pma_full, file.path(RESULT_SHINY, "pma_amzl_ALLminerals_final.shp"), overwrite = TRUE)
+terra::writeVector(pma_full, file.path(RESULT_SHINY, "pma_amzl_ALLminerals_final.geojson"), filetype = "GeoJSON", overwrite = TRUE)
 terra::writeVector(ti_amzl,  file.path(RESULT_SHINY, "ti_amzl.shp"),  overwrite = TRUE)
 terra::writeVector(uc_amzl,  file.path(RESULT_SHINY, "uc_amzl.shp"),  overwrite = TRUE)
 terra::writeVector(qui_amzl, file.path(RESULT_SHINY, "qui_amzl.shp"), overwrite = TRUE)
@@ -1176,17 +1285,7 @@ cfem_bioma_mensal <- cfem_bioma |>
   dplyr::mutate(data = as.Date(sprintf("%04d-%02d-01", ANO, MES)), proc_ano = paste0(trimws(PROCESSO), "/", ANO))
 readr::write_csv(cfem_bioma_mensal, file.path(RESULT_GEE, "cfem_AMAZONIA_ALLminerals_GEE_MONTHLY.csv"))
 
-# DB (.geojson — mantido, evita truncamento de nome de coluna)
-cols_drop_db <- c(
-  "arr_kg_T","arr_kg_L","arr_g_T","arr_g_L","arr_val_T","arr_val_L",
-  "arr_dt_F","arr_dt_L","arr_ndcl","arr_nbuy","arr_topb",
-  "aut_val_T","aut_n",
-  "ULT_EV_ID","ULT_EV_DAT","ULT_EV_DES","ULT_EVENTO",
-  "UCtype","UCname","TIname","QUIname",
-  "UCtype_ov","UCname_ov","TIname_ov","QUIname_ov",
-  "inf_MT","inf_IC","emb_MTa","emb_MTb","emb_IB","emb_IC"
-)
-pma_db <- pma_full |> dplyr::select(-dplyr::any_of(cols_drop_db))
+pma_db <- pma_full
 
 rename_db <- c(name_muni = "munic_pma", abbrev_state = "uf_pma",
                name_state = "estado", name_region = "regiao", code_muni = "cod_munic")
@@ -1195,6 +1294,7 @@ for (old in names(rename_db)) {
 }
 
 terra::writeVector(pma_db,      file.path(RESULT_DB, "pma_amzl_ALLminerals_final.geojson"), filetype = "GeoJSON", overwrite = TRUE)
+terra::writeVector(pma_db,      file.path(RESULT_DB, "pma_amzl_ALLminerals_final.shp"), overwrite = TRUE)
 terra::writeVector(ti_amzl,     file.path(RESULT_DB, "ti_amzl.geojson"),  filetype = "GeoJSON", overwrite = TRUE)
 terra::writeVector(uc_amzl,     file.path(RESULT_DB, "uc_amzl.geojson"),  filetype = "GeoJSON", overwrite = TRUE)
 terra::writeVector(qui_amzl,    file.path(RESULT_DB, "qui_amzl.geojson"), filetype = "GeoJSON", overwrite = TRUE)

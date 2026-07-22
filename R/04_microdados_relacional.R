@@ -43,8 +43,6 @@ schema_micro <- ler_schema_microdados(METADADOS_ODS)
 
 message(sprintf("[04] schema oficial carregado | %d tabelas mapeadas", length(schema_micro)))
 
-# Locale numérica: os txt da ANM seguem convenção BR (vírgula decimal, ponto
-# de milhar) — mesma convenção já vista nos arquivos CFEM no 02_pre_proc.R.
 LOCALE_MICRO <- readr::locale(encoding = "Windows-1252", decimal_mark = ",", grouping_mark = ".")
 
 # --- Leitura por schema, com log de problemas de parsing e de datas -----------
@@ -54,7 +52,6 @@ datas_log     <- list()
 ler_micro_schema <- function(arquivo) {
   spec <- schema_micro[[arquivo]]
   if (is.null(spec)) {
-    # fallback: caso o Título no .ods venha sem a extensão .txt
     spec <- schema_micro[[stringr::str_remove(arquivo, "\\.txt$")]]
   }
   if (is.null(spec)) {
@@ -82,7 +79,7 @@ ler_micro_schema <- function(arquivo) {
   df
 }
 
-# --- Arquivos COM dsprocesso (filtrados pela Amazônia) -------------------------
+# --- Arquivos COM dsprocesso  -------------------------
 arquivos_fato <- c(
   "Processo.txt"                = "micro_processo",
   "ProcessoEvento.txt"          = "micro_processo_evento",
@@ -95,7 +92,7 @@ arquivos_fato <- c(
   "ProcessoPropriedadeSolo.txt" = "micro_processo_propriedade_solo"
 )
 
-# --- Arquivos SEM dsprocesso (mantidos inteiros) --------------------------------
+# --- Arquivos SEM dsprocesso --------------------------------
 arquivos_inteiros <- c(
   "Pessoa.txt"                        = "micro_pessoa",
   "Municipio.txt"                     = "micro_municipio",
@@ -119,7 +116,7 @@ arquivos_inteiros <- c(
 )
 
 # --- Processa os arquivos FATO (filtrados pela Amazônia) -----------------------
-processo_txt_processo_key <- NULL  # guarda a chave 'processo' de Processo.txt p/ o check de descompasso
+processo_txt_processo_key <- NULL 
 
 for (arq in names(arquivos_fato)) {
   tabela  <- arquivos_fato[[arq]]

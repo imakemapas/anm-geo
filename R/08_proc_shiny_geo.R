@@ -25,10 +25,15 @@ OUTPUT_DIR <- here::here("shiny_dashboard")
 dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
 cfem_csv_path <- file.path(INPUT_DIR, "cfem_amzl_ALLminerals_GOLD_CASScorrected.csv")
-pma_shp_path  <- file.path(INPUT_DIR, "pma_amzl_ALLminerals_final.shp")
+# pma_geojson_path (decisao 2026-07-20): pma_full passou a ser exportado em
+# .geojson em vez de .shp no 05_integracao_final.R -- o .dbf do shapefile
+# trunca nomes de coluna em 10 caracteres, e com as colunas triplicadas por
+# foco (arr_kg_T_ouro/_cassiterita/_outros etc.) isso causava colisao real
+# (ex: "arr_kg_T_ouro" e "arr_kg_T_outros" truncam pro mesmo nome).
+pma_geojson_path <- file.path(INPUT_DIR, "pma_amzl_ALLminerals_final.geojson")
 
-if (!file.exists(cfem_csv_path)) stop("[08] CFEM nao encontrado: ", cfem_csv_path, " — rode o 05_integracao_final.R primeiro.")
-if (!file.exists(pma_shp_path))  stop("[08] PMA nao encontrado: ",  pma_shp_path,  " — rode o 05_integracao_final.R primeiro.")
+if (!file.exists(cfem_csv_path))     stop("[08] CFEM nao encontrado: ", cfem_csv_path,     " — rode o 05_integracao_final.R primeiro.")
+if (!file.exists(pma_geojson_path))  stop("[08] PMA nao encontrado: ",  pma_geojson_path,  " — rode o 05_integracao_final.R primeiro.")
 
 # =============================================================================
 # 1) CFEM base (declaracao a declaracao, sem agregacao)
@@ -46,6 +51,12 @@ cfem <- readr::read_csv(cfem_csv_path, show_col_types = FALSE) |>
     PESO_G_final  = as.numeric(PESO_G_final),
     PESO_KG_final = as.numeric(PESO_KG_final),
     preco_g_final = as.numeric(preco_g_final),
+    # colunas "limpas" (fonte: 05_integracao_final.R) -- NA quando a
+    # declaracao nao foi reconciliavel/sem quantidade; usar estas em
+    # qualquer soma/KPI para nao herdar a contaminacao dos casos nao
+    # resolvidos de cassiterita.
+    PESO_G_final_limpo  = as.numeric(PESO_G_final_limpo),
+    PESO_KG_final_limpo = as.numeric(PESO_KG_final_limpo),
     proc_ano      = paste0(trimws(PROCESSO), "/", ANO)
   )
 
@@ -76,10 +87,14 @@ cfem_anual <- cfem |>
     PESO_G        = sum(PESO_G,        na.rm = TRUE),
     PESO_G_final  = sum(PESO_G_final,  na.rm = TRUE),
     PESO_KG_final = sum(PESO_KG_final, na.rm = TRUE),
+    # versoes limpas (excluem dado_corrompido/sem_quantidade) -- usar estas
+    # nos KPIs/telas do app; as brutas acima ficam so como registro.
+    PESO_G_final_limpo  = sum(PESO_G_final_limpo,  na.rm = TRUE),
+    PESO_KG_final_limpo = sum(PESO_KG_final_limpo, na.rm = TRUE),
     .groups       = "drop"
   )
 
-pma_ocd_attr <- sf::st_read(pma_shp_path, quiet = TRUE) |>
+pma_ocd_attr <- sf::st_read(pma_geojson_path, quiet = TRUE) |>
   dplyr::select(
     PROCESSO, AREA_HA, FASE, ULT_EV_DAT, ULT_EV_DES,
     TIov, UCov, QUIov, TIov10km, UCov2_10km, QUIov10km,
@@ -166,7 +181,7 @@ tornar_valido <- function(x) {
   x
 }
 
-pma <- sf::st_read(pma_shp_path, quiet = TRUE) |> to_wgs84() |> tornar_valido()
+pma <- sf::st_read(pma_geojson_path, quiet = TRUE) |> to_wgs84() |> tornar_valido()
 uc  <- sf::st_read(file.path(INPUT_DIR, "uc_amzl.shp"),  quiet = TRUE) |> to_wgs84() |> tornar_valido() |> dplyr::select("nome_uc", "sigla_snuc")
 qui <- sf::st_read(file.path(INPUT_DIR, "qui_amzl.shp"), quiet = TRUE) |> to_wgs84() |> tornar_valido() |> dplyr::select("nm_comunid")
 ti  <- sf::st_read(file.path(INPUT_DIR, "ti_amzl.shp"),  quiet = TRUE) |> to_wgs84() |> tornar_valido() |> dplyr::select("terrai_nom")

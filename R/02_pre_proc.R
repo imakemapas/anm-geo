@@ -108,7 +108,6 @@ safe_step("CFEM smart parsing (ANM arrecadacao)", {
     df <- cfem_smart_read(
       p, 
       enc = "ISO-8859-1",
-      #enc = "UTF-8",
       decimal_score_cols = cfem_cols_valor[[nm]],
       log_dir = QA_DIR
     )
@@ -233,11 +232,6 @@ safe_step("MMA CNUC protected areas (UC)", {
 safe_step("INCRA Quilombolas", {
   territorios_dir <- file.path(RAW_DIR, "geo_territorios")
   exdir <- file.path(TMP_DIR, "incra_quilombolas")
-
-  # Busca por padrao (case-insensitive) em vez de nome exato: o INCRA
-  # disponibiliza o arquivo como "Áreas de Quilombolas.zip" (nome original,
-  # com acento/espaco, se baixado manualmente do site), mas o 01_download.R
-  # salva como "areas_quilombolas.zip". Aceita qualquer um dos dois.
   zip_candidates <- list.files(
     territorios_dir, pattern = "quilombola", ignore.case = TRUE, full.names = TRUE
   )
@@ -259,9 +253,7 @@ safe_step("INCRA Quilombolas", {
     if (length(shp_local) > 0) shp_path <- shp_local[1]
   }
 
-  # 3) se ainda nao achou, pula de verdade (sem usar return() aqui dentro:
-  #    esse bloco nao e uma funcao, entao return() sobe pro topo do script
-  #    e o safe_step registra FAILED em vez do skip pretendido)
+  # 3) se ainda nao achou, pula de verdade
   if (is.na(shp_path)) {
     message("INCRA: nenhum .shp encontrado (ZIP nem local) em ", territorios_dir, ". Skipping.")
   } else {
@@ -289,7 +281,6 @@ safe_step("IBAMA embargos (shp)", {
   EMBib$des_tad    <- to_upper_utf8(EMBib$des_tad)
   EMBib$des_infrac <- to_upper_utf8(EMBib$des_infrac)
 
-  # Filtro por palavra-chave com diagnóstico (ver R/utils.R, seção C).
   EMBib <- aplicar_filtro_palavras_chave(
     EMBib, campos = c("des_tad", "des_infrac"), regex = REGEX,
     label = "ibama_embargos", export_dir = QA_DIR
@@ -299,10 +290,7 @@ safe_step("IBAMA embargos (shp)", {
 })
 
 safe_step("IBAMA infractions (shp)", {
-  # Fonte trocou de CSV (auto_infracao_csv.zip, fora do ar) para SHP
-  # (ibama_autos_de_infracao_p.zip, dadosabertos via ftp-pamgia). Colunas
-  # reais do .dbf ainda nao confirmadas -- ver mensagem "Campos disponiveis"
-  # no log e ajustar cols_keep/campo de filtro depois.
+
   zip_path <- file.path(RAW_DIR, "geo_ibama", "ibama_autos_de_infracao_p.zip")
   exdir    <- file.path(TMP_DIR, "ibama_infracoes")
 
@@ -315,7 +303,7 @@ safe_step("IBAMA infractions (shp)", {
 
   n0 <- length(INFib)
   INFib <- terra::makeValid(INFib)
-  INFib <- terra::disagg(INFib)   # MULTIPOINT -> POINT individual
+  INFib <- terra::disagg(INFib)
   INFib <- terra::project(INFib, "EPSG:4326")
   message(sprintf("[IBAMA infracoes] pontos | inicial: %d | final: %d", n0, length(INFib)))
 
@@ -418,7 +406,6 @@ safe_step("SEMA-MT SIGA embargos (shp)", {
 
   x <- terra::vect(shp_path) |> clean_geometry(label = "SEMA-MT SIGA embargos")
 
-  # uppercase relevant text fields if present
   txt_cols <- intersect(c("NOME_RAZAO", "NOME_FANTA", "TIPO", "SUBTIPO", "DISPOSITIV",
                           "DESCRICAO_", "ATIVIDADE", "ATIVIDADE_"), names(x))
   if (length(txt_cols)) {
@@ -428,7 +415,6 @@ safe_step("SEMA-MT SIGA embargos (shp)", {
     rm(vals); gc()
   }
 
-  # filter by keywords across available fields
   fcols <- intersect(c("SUBTIPO", "DISPOSITIV", "DESCRICAO_", "ATIVIDADE", "ATIVIDADE_"), names(x))
   if (length(fcols)) {
     x <- aplicar_filtro_palavras_chave(
