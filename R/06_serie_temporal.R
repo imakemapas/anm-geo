@@ -189,7 +189,23 @@ proc_evento <- ler("micro_processo_evento") |>
 
 eventos_estado <- proc_evento |>
   dplyr::filter(papel %in% c("MUDA_FASE", "FECHA", "SUSPENDE", "RETOMA")) |>
-  dplyr::arrange(processo, dtevento, idevento)
+  # AJUSTE (2026-07-21, achado real: 886238/2022): eventos com a MESMA data
+  # (dtevento so tem granularidade de dia, sem hora) desempatavam por
+  # idevento (comparacao de string) -- ordem arbitraria, sem relacao com a
+  # ordem real dos atos. Padrao comum "revoga e reemite no mesmo dia" (ex:
+  # Portaria X revoga a concessao, Portaria X+1 concede de novo, minutos
+  # depois) ficava com o resultado invertido quando o numero do evento de
+  # FECHA era MAIOR que o de MUDA_FASE. Novo criterio: processa FECHA/
+  # SUSPENDE primeiro, MUDA_FASE/RETOMA por ultimo -- "abrir/retomar" sempre
+  # vence como estado final do dia, batendo com o padrao real observado.
+  # idevento continua como desempate final dentro do mesmo grupo de papel.
+  dplyr::mutate(.prioridade_tie = dplyr::case_when(
+    papel %in% c("FECHA", "SUSPENDE")   ~ 1L,
+    papel %in% c("MUDA_FASE", "RETOMA") ~ 2L,
+    TRUE                                 ~ 3L
+  )) |>
+  dplyr::arrange(processo, dtevento, .prioridade_tie, idevento) |>
+  dplyr::select(-.prioridade_tie)
 eventos_classificados <- eventos_estado |>
   dplyr::select(processo, dtevento, idevento, dsevento, tipo_proc, papel, dplyr::starts_with("categ_"))
 
@@ -547,6 +563,36 @@ print(eventos_judicial_despacho_diverso |> dplyr::count(categ_judicial_despacho,
 arrow::write_parquet(eventos_judicial_despacho_diverso, file.path(OUT_DIR, "eventos_judicial_despacho_diverso.parquet"))
 
 # =============================================================================
+# J) GU (GUIA DE UTILIZAÇÃO) PARA AUT PESQ (achado 2026-07-21)
+# =============================================================================
+# Autorizacao de Pesquisa pode legalmente declarar CFEM quando tem Guia de
+# Utilizacao valida -- sem isso, toda declaracao em AUT PESQ caia em
+# "fase_de_tramitacao_ou_pesquisa" (nao apto), mesmo quando a comercializacao
+# era autorizada. construir_intervalos_gu() (utils.R) reconstroi as janelas
+# de validade a partir de AUTORIZADA/APROVADO (regex "Validade:DD/MM/AAAA" na
+# publicacao, com fallback de duracao 1/2/3 anos), truncando por CANCELADA/
+# SUSPENSA -- mesmo raciocinio do art. 211/213 acima, aplicado a GU.
+eventos_gu_aut_pesq <- proc_evento |>
+  dplyr::filter(categ_gu, tipo_proc == "AUT PESQ") |>
+  dplyr::transmute(
+    processo, dtevento, idevento, dsevento,
+    publicacao = if ("dspublicacaodou" %in% names(proc_evento)) dspublicacaodou else NA_character_
+  )
+
+intervalos_gu_aut_pesq <- construir_intervalos_gu(eventos_gu_aut_pesq)
+
+message(sprintf(
+  "[06][J] GU/AUT PESQ: %d eventos de GU | %d processos com pelo menos 1 janela de validade reconstruida",
+  nrow(eventos_gu_aut_pesq), dplyr::n_distinct(intervalos_gu_aut_pesq$processo)
+))
+arrow::write_parquet(intervalos_gu_aut_pesq, file.path(OUT_DIR, "intervalos_gu_aut_pesq.parquet"))
+
+gu_valida_hoje_por_processo <- intervalos_gu_aut_pesq |>
+  dplyr::filter(xmin <= HOJE, HOJE <= xmax) |>
+  dplyr::distinct(processo) |>
+  dplyr::mutate(gu_valida_hoje = TRUE)
+
+# =============================================================================
 # F) SITUAÇÃO ATUAL
 fase_atual <- serie_fase_status |>
   dplyr::group_by(processo) |>
@@ -629,10 +675,12 @@ situacao_atual <- fase_atual |>
   dplyr::left_join(lic_amb,            by = "processo") |>
   dplyr::left_join(titular_atual_df,   by = "processo") |>
   dplyr::left_join(protecao_211_213_por_processo, by = "processo") |>
+  dplyr::left_join(gu_valida_hoje_por_processo,    by = "processo") |>
   dplyr::mutate(
     fase_evento_traduzida = dplyr::coalesce(mapa_fase_evento_pma[fase_evento], fase_evento),
     fase_diverge_pma = normaliza_fase(fase_evento_traduzida) != normaliza_fase(fase_pma),
     nunca_protocolou_lic_amb = is.na(dt_protocolo_licenca_ambiental),
+    gu_valida_hoje = tidyr::replace_na(gu_valida_hoje, FALSE),
     # AJUSTE (2026-07-21): Concessao de Lavra e por prazo INDETERMINADO --
     # nao existe vencimento nesse regime (diferente de PLG/Aut. Pesquisa,
     # que tem prazo fixo e exigem renovacao). Por isso dtvencimento fica
@@ -645,7 +693,14 @@ situacao_atual <- fase_atual |>
       dt_protocolo_renovacao_plg <= dt_vencimento &
       !tem_indeferimento_renovacao_plg,
 
+    # AJUSTE (2026-07-21): Autorizacao de Pesquisa com GU (Guia de
+    # Utilizacao) valida pode legalmente declarar CFEM -- ver Bloco J acima.
+    # Checado ANTES da regra generica de FASES_QUE_OPERAM, pra nao passar
+    # por "fase_de_tramitacao_ou_pesquisa" mesmo com GU valida.
+    aut_pesq_com_gu = fase_evento %in% "AUT PESQ" & gu_valida_hoje,
+
     apto_operar = dplyr::case_when(
+      aut_pesq_com_gu                       ~ "TRUE",
       !(fase_evento %in% FASES_QUE_OPERAM) ~ "em_analise",
       status_evento != "ATIVA"              ~ "FALSE",
       nunca_protocolou_lic_amb              ~ "FALSE",
@@ -664,7 +719,7 @@ situacao_atual <- fase_atual |>
     ),
 
     # --- FLAGS BINARIAS INDEPENDENTES
-    flag_fase_nao_operacional                  = !(fase_evento %in% FASES_QUE_OPERAM),
+    flag_fase_nao_operacional                  = !(fase_evento %in% FASES_QUE_OPERAM) & !aut_pesq_com_gu,
     flag_status_nao_ativo                      = status_evento != "ATIVA",
     flag_sem_licenca_ambiental_previa          = (fase_evento %in% FASES_QUE_OPERAM) & nunca_protocolou_lic_amb,
     flag_vencimento_sem_data_a_revisar         = !titulo_ok_vencimento & status_vencimento == "sem_data_a_revisar",
@@ -675,6 +730,7 @@ situacao_atual <- fase_atual |>
                status_vencimento, dt_vencimento, dt_protocolo_licenca_ambiental,
                dt_ultimo_protocolo_licenca_ambiental, n_protocolos_licenca_ambiental,
                dt_protocolo_renovacao_plg, tem_indeferimento_renovacao_plg, protegido_211_213,
+               gu_valida_hoje, aut_pesq_com_gu,
                titular_atual, nrcpfcnpj_titular_atual, apto_operar, motivo_nao_apto,
                flag_fase_nao_operacional, flag_status_nao_ativo, flag_sem_licenca_ambiental_previa,
                flag_titulo_vencido, flag_titulo_vencido_renovacao_protocolada, flag_vencimento_sem_data_a_revisar)

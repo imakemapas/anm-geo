@@ -220,6 +220,11 @@ serie_fase_status            <- ler_parquet(ST_DIR, "serie_fase_status")
 acessorios_ambiental         <- ler_parquet(ST_DIR, "acessorios_ambiental")
 dic_classificado             <- ler_parquet(ST_DIR, "dicionario_eventos_classificado")
 eventos_renovacao_plg        <- ler_parquet(ST_DIR, "eventos_renovacao_plg_211_213")
+# NOVO (Bloco J do 06 — GU para AUT PESQ, achado 2026-07-21): mesmo
+# tratamento opcional dos demais acima — necessario para AUT PESQ com GU
+# valida contar como apto, tanto na reconstrucao historica quanto na faixa
+# do grafico.
+intervalos_gu_aut_pesq       <- ler_parquet(ST_DIR, "intervalos_gu_aut_pesq")
 
 eventos_penalidades_ocorrencias <- ler_parquet(ST_DIR, "eventos_penalidades_ocorrencias")
 
@@ -232,6 +237,11 @@ if (is.null(situacao_atual) || is.null(situacao_documental) ||
 if (is.null(eventos_renovacao_plg)) {
   warning("[07] eventos_renovacao_plg_211_213.parquet nao encontrado em ", ST_DIR,
           " — rode o 06 atualizado (Bloco G) para a protecao Art. 211/213 funcionar. ",
+          "Seguindo sem ela (comportamento equivalente ao anterior a esta mudanca).")
+}
+if (is.null(intervalos_gu_aut_pesq)) {
+  warning("[07] intervalos_gu_aut_pesq.parquet nao encontrado em ", ST_DIR,
+          " — rode o 06 atualizado (Bloco J) para AUT PESQ com GU valida contar como apto. ",
           "Seguindo sem ela (comportamento equivalente ao anterior a esta mudanca).")
 }
 if (is.null(eventos_penalidades_ocorrencias)) {
@@ -341,7 +351,8 @@ message("[07][parte2] reconstruindo aptidao historica (fonte unica: segmentos_ap
 processos_com_cfem <- unique(cfem$PROCESSO)
 
 segmentos_todos <- dplyr::bind_rows(lapply(processos_com_cfem, function(p) {
-  segmentos_aptidao_processo(p, serie_fase_status, situacao_documental, protocolos_licenca_ambiental, eventos_renovacao_plg)
+  segmentos_aptidao_processo(p, serie_fase_status, situacao_documental, protocolos_licenca_ambiental,
+                              eventos_renovacao_plg, intervalos_gu_aut_pesq)
 }))
 
 base_decl <- cfem |> dplyr::rename(processo = PROCESSO) |> dplyr::select(cfem_id, processo, data_cfem)
@@ -494,6 +505,8 @@ if (!is.null(situacao_atual))
   saveRDS(situacao_atual, file.path(OUTPUT_DIR, "situacao_atual.rds"))
 if (!is.null(eventos_renovacao_plg))
   saveRDS(eventos_renovacao_plg, file.path(OUTPUT_DIR, "eventos_renovacao_plg_211_213.rds"))
+if (!is.null(intervalos_gu_aut_pesq))
+  saveRDS(intervalos_gu_aut_pesq, file.path(OUTPUT_DIR, "intervalos_gu_aut_pesq.rds"))
 if (!is.null(eventos_penalidades_ocorrencias))
   saveRDS(eventos_penalidades_ocorrencias, file.path(OUTPUT_DIR, "eventos_penalidades_ocorrencias.rds"))
 
