@@ -32,21 +32,7 @@ dir.create(PRE_PROC_DIR, recursive = TRUE, showWarnings = FALSE)
 dir.create(TMP_DIR,      recursive = TRUE, showWarnings = FALSE)
 dir.create(QA_DIR,       recursive = TRUE, showWarnings = FALSE)
 
-KEYWORDS <- c(
-  "GARIMP",                  # GARIMPO, GARIMPEIRO/A, GARIMPAGEM, GARIMPAR...
-  "MINER",                   # MINERAL(IS), MINERARIO/A, MINERIO, MINERACAO, MINERADORA...
-  "AUR[IÍ]FER[OA]",          # AURIFERO/A, AURÍFERO/A
-  "CASS[IE]TERITA",          # CASSITERITA, CASSETERITA (grafia alternativa)
-  "MERC[UÚ]RIO",             # MERCURIO, MERCÚRIO
-  "ASSORE",                  # ASSOREAMENTO, ASSOREAR, ASSOREADO/A...
-  "LEITO",
-  "LAVRA",
-  "BARRAGE(M|NS)",           # BARRAGEM, BARRAGENS
-  "OURO",
-  "DIAMANTE",
-  "DIAMANT[IÍ]FER[OA]"       # DIAMANTIFERO/A, DIAMANTÍFERO/A
-)
-REGEX <- paste(KEYWORDS, collapse = "|")
+REGEX <- REGEX_GARIMPO  # centralizado em R/utils.R (constante KEYWORDS_GARIMPO)
 
 etl_log <- list()
 
@@ -157,7 +143,7 @@ safe_step("SIGMINE PMA extraction", {
   terra::writeVector(pma, file.path(PRE_PROC_DIR, "sigmine_pma.shp"), overwrite = TRUE)
 })
 
-# FUNAI TI / MMA CNUC / INCRA) ------------------------------
+# FUNAI TI / MMA CNUC / INCRA ------------------------------
 safe_step("FUNAI Indigenous Lands (TI)", {
   zip_path <- file.path(RAW_DIR, "geo_territorios", "tis_poligonais.zip")
   exdir    <- file.path(TMP_DIR, "funai_ti")
@@ -238,7 +224,7 @@ safe_step("INCRA Quilombolas", {
 
   shp_path <- NA_character_
 
-  # 1) tenta o ZIP (primeiro candidato encontrado)
+  # 1) tenta o ZIP
   if (length(zip_candidates) > 0) {
     if (safe_unzip(zip_candidates[1], exdir)) {
       shp_path <- first_match(exdir, "\\.shp$")
@@ -292,31 +278,10 @@ safe_step("IBAMA embargos (shp)", {
 safe_step("IBAMA infractions (shp)", {
 
   zip_path <- file.path(RAW_DIR, "geo_ibama", "ibama_autos_de_infracao_p.zip")
-  exdir    <- file.path(TMP_DIR, "ibama_infracoes")
+  if (!file.exists(zip_path)) stop("Missing zip: ", zip_path)
 
-  if (!safe_unzip(zip_path, exdir)) stop("Missing or unreadable zip: ", zip_path)
-
-  shp_path <- first_match(exdir, "\\.shp$")
-  if (is.na(shp_path)) stop("No IBAMA infractions shapefile found after unzip.")
-
-  INFib <- terra::vect(shp_path)
-
-  n0 <- length(INFib)
-  INFib <- terra::makeValid(INFib)
-  INFib <- terra::disagg(INFib)
-  INFib <- terra::project(INFib, "EPSG:4326")
-  message(sprintf("[IBAMA infracoes] pontos | inicial: %d | final: %d", n0, length(INFib)))
-
-  message("[ibama_infracoes] Campos disponiveis: ", paste(names(INFib), collapse = ", "))
-  message("[ibama_infracoes] AVISO: filtro por palavra-chave e selecao de colunas ",
-          "ainda NAO aplicados -- confirmar nomes de campo (equivalentes a ",
-          "DES_AUTO_INFRACAO/CPF_CNPJ_INFRATOR na fonte antiga) antes de usar em producao.")
-
-  if (length(INFib) == 0) {
-    message("[IBAMA infracoes] AVISO: 0 registros apos limpeza -- shapefile nao sera gravado.")
-  } else {
-    terra::writeVector(INFib, file.path(PRE_PROC_DIR, "ibama_infracoes.shp"), overwrite = TRUE)
-  }
+  # PAUSADO (decisao 2026-08): inspecao no QGIS mostrou geometria "estourando"
+  # para fora do Brasil -- muitos registros com NUM_LONGIT/NUM_LATITU = 0
 })
 
 safe_step("ICMBio embargos (shp)", {
@@ -343,7 +308,7 @@ safe_step("ICMBio embargos (shp)", {
 })
 
 safe_step("ICMBio infractions (shp)", {
-  zip_path <- file.path(RAW_DIR, "geo_icmbio", "autos_infracao_shp.zip")
+  zip_path <- file.path(RAW_DIR, "geo_icmbio", "autos_infracao_icmbio.zip")
   exdir    <- file.path(TMP_DIR, "icmbio_infracoes")
 
   if (!safe_unzip(zip_path, exdir)) stop("Missing or unreadable zip: ", zip_path)
@@ -378,8 +343,8 @@ safe_step("SEMA-MT embargos (shp)", {
   EMBmt <- terra::vect(shp_path) |> clean_geometry(label = "SEMA-MT embargos")
   EMBmt <- EMBmt[, c("NOME", "CPF_CNPJ", "DANO", "ANO_DESMAT", "DAT_LAVRAT", "N_PROCESSO")]
 
-  EMBmt$DANO <- to_upper_utf8(EMBmt$DANO)
-  EMBmt$NOME <- to_upper_utf8(EMBmt$NOME)
+  EMBmt$DANO <- to_upper_utf8(EMBmt$DANO, from = "Windows-1252")
+  EMBmt$NOME <- to_upper_utf8(EMBmt$NOME, from = "Windows-1252")
 
   EMBmt <- aplicar_filtro_palavras_chave(
     EMBmt, campos = "DANO", regex = REGEX,
@@ -410,17 +375,30 @@ safe_step("SEMA-MT SIGA embargos (shp)", {
                           "DESCRICAO_", "ATIVIDADE", "ATIVIDADE_"), names(x))
   if (length(txt_cols)) {
     vals <- terra::values(x)
-    vals[txt_cols] <- lapply(vals[txt_cols], to_upper_utf8)
+    vals[txt_cols] <- lapply(vals[txt_cols], to_upper_utf8, from = "Windows-1252")
     terra::values(x) <- vals
     rm(vals); gc()
+  }
+
+  # TIPO e campo categorico fechado (poucas opcoes no dominio, ex: "RECURSOS
+  # MINERAIS") -- mais confiavel que regex em texto livre. Decisao 2026-08:
+  # somar como criterio adicional (OR) ao filtro de palavra-chave abaixo, em
+  # vez de substitui-lo, para nao perder registro capturado so pelo texto.
+  keep_tipo <- if ("TIPO" %in% names(x)) {
+    trimws(as.character(terra::values(x)$TIPO)) == "RECURSOS MINERAIS"
+  } else {
+    NULL
   }
 
   fcols <- intersect(c("SUBTIPO", "DISPOSITIV", "DESCRICAO_", "ATIVIDADE", "ATIVIDADE_"), names(x))
   if (length(fcols)) {
     x <- aplicar_filtro_palavras_chave(
       x, campos = fcols, regex = REGEX,
-      label = "sema_mt_embargos_siga", export_dir = QA_DIR
+      label = "sema_mt_embargos_siga", export_dir = QA_DIR,
+      keep_extra = keep_tipo
     )
+  } else if (!is.null(keep_tipo)) {
+    x <- subset_rows(x, keep_tipo)
   } else {
     message("SIGA embargos: no filterable text fields found; saving full layer.")
   }
@@ -449,17 +427,28 @@ safe_step("SEMA-MT SIGA infractions (shp)", {
                           "DESCRICAO_", "ATIVIDADE", "ATIVIDADE_"), names(x))
   if (length(txt_cols)) {
     vals <- terra::values(x)
-    vals[txt_cols] <- lapply(vals[txt_cols], to_upper_utf8)
+    vals[txt_cols] <- lapply(vals[txt_cols], to_upper_utf8, from = "Windows-1252")
     terra::values(x) <- vals
     rm(vals); gc()
+  }
+
+  # Mesmo raciocinio do SIGA embargos: TIPO == "RECURSOS MINERAIS" somado via
+  # OR ao filtro de texto livre (ver comentario na secao de embargos acima).
+  keep_tipo <- if ("TIPO" %in% names(x)) {
+    trimws(as.character(terra::values(x)$TIPO)) == "RECURSOS MINERAIS"
+  } else {
+    NULL
   }
 
   fcols <- intersect(c("SUBTIPO", "DISPOSITIV", "DESCRICAO_", "ATIVIDADE", "ATIVIDADE_"), names(x))
   if (length(fcols)) {
     x <- aplicar_filtro_palavras_chave(
       x, campos = fcols, regex = REGEX,
-      label = "sema_mt_infracoes_siga", export_dir = QA_DIR
+      label = "sema_mt_infracoes_siga", export_dir = QA_DIR,
+      keep_extra = keep_tipo
     )
+  } else if (!is.null(keep_tipo)) {
+    x <- subset_rows(x, keep_tipo)
   } else {
     message("SIGA infractions: no filterable text fields found; saving full layer.")
   }

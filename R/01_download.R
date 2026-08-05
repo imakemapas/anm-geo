@@ -15,7 +15,7 @@ suppressPackageStartupMessages({
   library(tibble)
 })
 
-# SKIP_ANM <- TRUE   # TRUE = pula o bloco ANM nesta execução
+MAX_ATTEMPTS_DOWNLOAD <- 5  # tentativas por arquivo, por rodada (ver bloco de retry automático no fim do script)
 
 ROOT      <- here::here()
 RAW_DIR   <- here::here("data", "raw_data")
@@ -121,25 +121,19 @@ config_geo <- list(
   #   )
   # ),
 
-  # --- IBAMA: fiscalizacao/embargo federal, atualizacao rapida ---------------
+  # --- IBAMA: fiscalizacao/embargo federal ---------------
   ibama = list(
     dest = "geo_ibama",
     urls = c(
       "adm_embargos_ibama_a.zip" =
         "https://ftp-pamgia.ibama.gov.br/dados/adm_embargos_ibama_a.zip",
 
-      # "ibama_embargos_a.zip" =
-      #   "https://ftp-pamgia.ibama.gov.br/dados/ibama_embargos_a.zip",
-
       "ibama_autos_de_infracao_p.zip" =
         "https://ftp-pamgia.ibama.gov.br/dados/ibama_autos_de_infracao_p.zip"#,
-
-      # "auto_infracao_csv.zip" =
-      #   "https://dadosabertos.ibama.gov.br/dados/SIFISC/auto_infracao/auto_infracao/auto_infracao_csv.zip"
     )
   ),
 
-  # --- ICMBio: fiscalizacao/embargo federal, atualizacao rapida --------------
+  # --- ICMBio: fiscalizacao/embargo federal --------------
   icmbio = list(
     dest = "geo_icmbio",
     urls = c(
@@ -179,15 +173,13 @@ geo_targets <- list(
 
 targets <- c(anm_targets, geo_targets)
 
-#targets <- if (SKIP_ANM) geo_targets else c(anm_targets, geo_targets)
-
 # Timestamp
 TS_EXECUCAO <- format(Sys.time(), "%Y-%m-%d_%H%M%S")
 
 manifests_anteriores <- listar_manifests_anteriores()
 
 results_list <- purrr::map(targets, \(t) {
-  download_named_urls(t$urls, t$dest, target_name = t$name)
+  download_named_urls(t$urls, t$dest, target_name = t$name, max_attempts = MAX_ATTEMPTS_DOWNLOAD)
 })
 
 # Finish ---------------------------------------------------------------------
@@ -195,38 +187,35 @@ todos_arquivos <- purrr::list_flatten(results_list)
 erros          <- purrr::keep(todos_arquivos, ~ .x$success == FALSE)
 
 if (length(erros) > 0) {
-  message("\n ATTENTION: ", length(erros), " download(s) failed.")
-  purrr::walk(erros, ~ message(.x$filename))
+  message("\n ATTENTION: ", length(erros), " download(s) failed after ",
+          MAX_ATTEMPTS_DOWNLOAD, " attempts. Retrying automatically (1 extra round, no prompt)...")
 
-  tentar_de_novo <- readline(prompt = "Would you like to try downloading these errors now?? (y/n): ")
+  retries <- purrr::map(erros, ~ {
+    r <- download_file(url = .x$url, dest_dir = .x$dest_dir, filename = .x$filename,
+                        max_attempts = MAX_ATTEMPTS_DOWNLOAD)
+    list(
+      target = .x$target, filename = .x$filename, url = .x$url, dest_dir = .x$dest_dir,
+      success = r$success, sha256 = r$sha256, size_bytes = r$size_bytes,
+      attempts_used = r$attempts_used, note = paste0("retry_automatico: ", r$note)
+    )
+  })
 
-  if (tolower(tentar_de_novo) == "y") {
-    retries <- purrr::map(erros, ~ {
-      r <- download_file(url = .x$url, dest_dir = .x$dest_dir, filename = .x$filename)
-      list(
-        target = .x$target, filename = .x$filename, url = .x$url, dest_dir = .x$dest_dir,
-        success = r$success, sha256 = r$sha256, size_bytes = r$size_bytes,
-        attempts_used = r$attempts_used, note = paste0("retry_manual: ", r$note)
-      )
-    })
-
-    for (r in retries) {
-      idx <- purrr::detect_index(
-        todos_arquivos,
-        ~ .x$dest_dir == r$dest_dir && .x$filename == r$filename
-      )
-      if (idx > 0) todos_arquivos[[idx]] <- r
-    }
+  for (r in retries) {
+    idx <- purrr::detect_index(
+      todos_arquivos,
+      ~ .x$dest_dir == r$dest_dir && .x$filename == r$filename
+    )
+    if (idx > 0) todos_arquivos[[idx]] <- r
   }
 } else {
   message("\nProcess completed successfully.")
 }
 
-# --- Resumo final: o que continua falhando apos eventual retry --------------
+# --- Resumo final: o que continua falhando apos a rodada extra --------------
 erros_finais <- purrr::keep(todos_arquivos, ~ .x$success == FALSE)
 if (length(erros_finais) > 0) {
-  message("\n Ocorreram: ", length(erros_finais), " arquivo(s) continuam com falha:")
-  purrr::walk(erros_finais, ~ message(" - [", .x$target, "] ", .x$filename))
+  message("\n Ocorreram: ", length(erros_finais), " arquivo(s) continuam com falha apos todas as tentativas:")
+  purrr::walk(erros_finais, ~ message(" - [", .x$target, "] ", .x$filename, " | url: ", .x$url))
 } else {
   message("\nTodos os arquivos foram baixados com sucesso.")
 }

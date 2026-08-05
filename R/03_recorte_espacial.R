@@ -88,8 +88,30 @@ cm_conflitos <- cm_clean |>
   dplyr::inner_join(dplyr::filter(contagem_conflitos, tem_conflito), by = "PROCESSO")
 
 if (nrow(cm_conflitos) > 0) {
+  cm_conflitos <- cm_conflitos |>
+    dplyr::mutate(DT_CESSAO_formatada = as.Date(DT_CESSAO, format = "%d/%m/%Y"))
+
+  processos_sem_cessao <- cm_conflitos |>
+    dplyr::group_by(PROCESSO) |>
+    dplyr::summarise(tem_cessao = any(!is.na(DT_CESSAO_formatada)), .groups = "drop") |>
+    dplyr::filter(!tem_cessao) |>
+    dplyr::pull(PROCESSO)
+
+  if (length(processos_sem_cessao) > 0) {
+    conflitos_sem_cessao <- cm_conflitos |>
+      dplyr::filter(PROCESSO %in% processos_sem_cessao) |>
+      dplyr::select(PROCESSO, TIPO_REQcm, FASEcm, CPF_CNPJcm, TITULARcm, SUBScm, DT_CESSAO) |>
+      dplyr::arrange(PROCESSO)
+
+    readr::write_csv(conflitos_sem_cessao, file.path(QA_DIR, "cm_conflitos_sem_cessao.csv"))
+    message(sprintf(
+      "[cadastro_mineiro] ATENCAO: %d processo(s) em conflito SEM nenhuma DT_CESSAO (desempate por cessao nao se aplica) -- detalhe: %s",
+      length(processos_sem_cessao), file.path(QA_DIR, "cm_conflitos_sem_cessao.csv")
+    ))
+    print(conflitos_sem_cessao, n = Inf)
+  }
+
   cm_resolvidos <- cm_conflitos |>
-    dplyr::mutate(DT_CESSAO_formatada = as.Date(DT_CESSAO, format = "%d/%m/%Y")) |>
     dplyr::group_by(PROCESSO) |>
     dplyr::arrange(PROCESSO, dplyr::desc(DT_CESSAO_formatada)) |>
     dplyr::summarise(dplyr::across(

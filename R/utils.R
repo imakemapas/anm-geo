@@ -23,9 +23,9 @@ suppressPackageStartupMessages({
   library(here)
   library(dplyr)
   library(stringr)
+  library(stringi)
   library(readr)
   library(tibble)
-  #library(curl) 
 })
 
 # ==============================================================================
@@ -74,111 +74,6 @@ tamanho_anterior <- function(dest_dir, filename, manifests = listar_manifests_an
   }
   NA_integer_
 }
- 
-# content_length_remoto <- function(url) {
-#   tryCatch({
-#     h <- curl::new_handle(nobody = TRUE, followlocation = TRUE, timeout = 60)
-#     resp <- curl::curl_fetch_memory(url, handle = h)
-#     linhas <- strsplit(rawToChar(resp$headers), "\r\n")[[1]]
-#     linha_cl <- linhas[grepl("^content-length:", tolower(linhas))]
-#     if (length(linha_cl) == 0) return(NA_integer_)
-#     as.integer(trimws(sub("^[Cc]ontent-[Ll]ength:\\s*", "", linha_cl[1])))
-#   }, error = function(e) NA_integer_)
-# }
-
-# download_file <- function(url, dest_dir, filename = basename(url), max_attempts = 3) {
-#   dir.create(dest_dir, recursive = TRUE, showWarnings = FALSE)
-#   dst <- file.path(dest_dir, filename)
-
-#   if (filename == "tis_poligonais.zip" && file.exists(dst) && file.info(dst)$size > 1000) {
-#     message("FUNAI file already exists. Skipping.")
-#     return(list(success = TRUE, sha256 = sha256_file(dst), size_bytes = file.info(dst)$size,
-#                 attempts_used = 0L, note = "skip_existente_funai"))
-#   }
-
-#   resultado_falha <- list(success = FALSE, sha256 = NA_character_, size_bytes = NA_integer_,
-#                           attempts_used = max_attempts, note = "falhou_apos_todas_tentativas")
-
-#   for (attempt in seq_len(max_attempts)) {
-#     message("Downloading: ", filename, " [", attempt, "/", max_attempts, "]")
-#     ok <- tryCatch({
-#       download.file(url, destfile = dst, mode = "wb", method = "libcurl")
-#       if (!file.exists(dst) || is.na(file.info(dst)$size) || file.info(dst)$size == 0) {
-#         stop("Downloaded file is missing or empty.")
-#       }
-#       TRUE
-#     }, error = function(e) {
-#       warning("Attempt ", attempt, " failed: ", filename, " | ", conditionMessage(e))
-#       FALSE
-#     })
-#     if (ok) {
-#       message("OK: ", filename)
-#       return(list(success = TRUE, sha256 = sha256_file(dst), size_bytes = file.info(dst)$size,
-#                   attempts_used = attempt, note = "download_ok"))
-#     }
-#     Sys.sleep(runif(1, 5, 15))
-#   }
-#   resultado_falha
-# }
-
-# download_file <- function(url, dest_dir, filename = basename(url), max_attempts = 3) {
-#   dir.create(dest_dir, recursive = TRUE, showWarnings = FALSE)
-#   dst <- file.path(dest_dir, filename)
- 
-#   if (filename == "tis_poligonais.zip" && file.exists(dst) && file.info(dst)$size > 1000) {
-#     message("FUNAI file already exists. Skipping.")
-#     return(list(success = TRUE, sha256 = sha256_file(dst), size_bytes = file.info(dst)$size,
-#                 attempts_used = 0L, note = "skip_existente_funai"))
-#   }
- 
-#   tamanho_esperado <- content_length_remoto(url)
-#   if (is.na(tamanho_esperado)) {
-#     message("[download] AVISO: servidor nao informou Content-Length para ", filename,
-#             " — completude checada so por size>0 (comportamento antigo).")
-#   } else {
-#     message(sprintf("[download] Content-Length esperado para %s: %s bytes",
-#                     filename, format(tamanho_esperado, big.mark = ".")))
-#   }
- 
-#   resultado_falha <- list(success = FALSE, sha256 = NA_character_, size_bytes = NA_integer_,
-#                           attempts_used = max_attempts, note = "falhou_apos_todas_tentativas")
- 
-#   for (attempt in seq_len(max_attempts)) {
-#     message("Downloading: ", filename, " [", attempt, "/", max_attempts, "]")
-#     ok <- tryCatch({
-#       download.file(url, destfile = dst, mode = "wb", method = "libcurl")
- 
-#       if (!file.exists(dst) || is.na(file.info(dst)$size) || file.info(dst)$size == 0) {
-#         stop("Downloaded file is missing or empty.")
-#       }
- 
-#       tam_baixado <- file.info(dst)$size
-#       if (!is.na(tamanho_esperado) && tam_baixado != tamanho_esperado) {
-#         stop(sprintf(
-#           "Download truncado/incompleto: esperado %s bytes, recebido %s bytes (diferenca de %s bytes).",
-#           format(tamanho_esperado, big.mark = "."), format(tam_baixado, big.mark = "."),
-#           format(tamanho_esperado - tam_baixado, big.mark = ".")
-#         ))
-#       }
- 
-#       TRUE
-#     }, error = function(e) {
-#       warning("Attempt ", attempt, " failed: ", filename, " | ", conditionMessage(e))
-
-#       if (file.exists(dst)) unlink(dst)
-#       FALSE
-#     })
-#     if (ok) {
-#       message("OK: ", filename, " | size=", format(file.info(dst)$size, big.mark = "."),
-#               ifelse(is.na(tamanho_esperado), "", " | completude confirmada via Content-Length"))
-#       return(list(success = TRUE, sha256 = sha256_file(dst), size_bytes = file.info(dst)$size,
-#                   attempts_used = attempt, note = "download_ok"))
-#     }
-#     Sys.sleep(runif(1, 5, 15))
-#   }
-#   resultado_falha
-# }
-
  
 download_file <- function(url, dest_dir, filename = basename(url), max_attempts = 5) {
   dir.create(dest_dir, recursive = TRUE, showWarnings = FALSE)
@@ -232,9 +127,9 @@ download_file <- function(url, dest_dir, filename = basename(url), max_attempts 
 }
  
 
-download_named_urls <- function(named_urls, dest_dir, target_name) {
+download_named_urls <- function(named_urls, dest_dir, target_name, max_attempts = 5) {
   purrr::imap(named_urls, ~{
-    r <- download_file(url = .x, dest_dir = dest_dir, filename = .y)
+    r <- download_file(url = .x, dest_dir = dest_dir, filename = .y, max_attempts = max_attempts)
     Sys.sleep(runif(1, 1, 3))
     list(target = target_name, filename = .y, url = .x, dest_dir = dest_dir,
          success = r$success, sha256 = r$sha256, size_bytes = r$size_bytes,
@@ -266,7 +161,11 @@ safe_unzip <- function(zip_path, exdir) {
   tryCatch({ unzip(zip_path, exdir = exdir); TRUE }, error = function(e) FALSE)
 }
 
-to_upper_utf8 <- function(x) toupper(iconv(x, from = "", to = "UTF-8"))
+to_upper_utf8 <- function(x, from = "") {
+  if (nzchar(from)) x <- stringi::stri_encode(x, from = from, to = "UTF-8")
+  else x <- iconv(x, from = from, to = "UTF-8")
+  toupper(x)
+}
 
 first_match <- function(path, pattern, ignore.case = TRUE) {
   x <- list.files(path, pattern = pattern, ignore.case = ignore.case, full.names = TRUE)
@@ -318,6 +217,26 @@ relacionar_flag_opcional <- function(pma, camada) {
 #       primeiro) para revisão manual — é o jeito de checar se a lista de
 #       keywords está deixando passar variantes de escrita.
 
+# Palavras-chave de garimpo/mineracao usadas no filtro das camadas de
+# fiscalizacao (IBAMA/ICMBio/SEMA-MT). Centralizada aqui -- antes vivia
+# duplicada dentro de 02_pre_proc.R; qualquer ajuste na lista agora vale
+# tanto para o pre-proc quanto para os checks de diagnostico.
+KEYWORDS_GARIMPO <- c(
+  "GARIMP",                  # GARIMPO, GARIMPEIRO/A, GARIMPAGEM, GARIMPAR...
+  "MINER",                   # MINERAL(IS), MINERARIO/A, MINERIO, MINERACAO, MINERADORA...
+  "AUR[IÍ]FER[OA]",          # AURIFERO/A, AURÍFERO/A
+  "CASS[IE]TERITA",          # CASSITERITA, CASSETERITA (grafia alternativa)
+  "MERC[UÚ]RIO",             # MERCURIO, MERCÚRIO
+  "ASSORE",                  # ASSOREAMENTO, ASSOREAR, ASSOREADO/A...
+  "LEITO",
+  "LAVRA",
+  "BARRAGE(M|NS)",           # BARRAGEM, BARRAGENS
+  "OURO",
+  "DIAMANTE",
+  "DIAMANT[IÍ]FER[OA]"       # DIAMANTIFERO/A, DIAMANTÍFERO/A
+)
+REGEX_GARIMPO <- paste(KEYWORDS_GARIMPO, collapse = "|")
+
 get_attr_table <- function(x) as.data.frame(x)
 
 subset_rows <- function(x, keep) {
@@ -325,7 +244,8 @@ subset_rows <- function(x, keep) {
 }
 
 aplicar_filtro_palavras_chave <- function(x, campos, regex, label,
-                                          export_dir = NULL, top_n = 40) {
+                                          export_dir = NULL, top_n = 40,
+                                          keep_extra = NULL) {
   attrs  <- get_attr_table(x)
   campos <- intersect(campos, names(attrs))
   if (length(campos) == 0) {
@@ -339,8 +259,14 @@ aplicar_filtro_palavras_chave <- function(x, campos, regex, label,
   )
 
   keep_por_campo <- lapply(textos, function(v) !is.na(v) & stringr::str_detect(v, regex))
-  keep <- Reduce(`|`, keep_por_campo)
-  keep[is.na(keep)] <- FALSE
+  keep_regex <- Reduce(`|`, keep_por_campo)
+  keep_regex[is.na(keep_regex)] <- FALSE
+
+  # keep_extra: criterio adicional (ex: campo categorico fechado, tipo
+  # TIPO == "RECURSOS MINERAIS" no SEMA-MT SIGA) somado via OR ao resultado
+  # da regex em texto livre -- usado quando a camada tem, alem do texto
+  # livre, uma classificacao mais confiavel que a busca por palavra-chave.
+  keep <- if (is.null(keep_extra)) keep_regex else (keep_regex | keep_extra)
 
   n_antes  <- nrow(attrs)
   n_depois <- sum(keep)
@@ -350,6 +276,9 @@ aplicar_filtro_palavras_chave <- function(x, campos, regex, label,
                   ifelse(n_antes > 0, 100 * n_depois / n_antes, NA)))
   for (cc in campos) {
     message(sprintf("    campo '%s' sozinho capturaria: %d", cc, sum(keep_por_campo[[cc]])))
+  }
+  if (!is.null(keep_extra)) {
+    message(sprintf("    criterio extra (categoria) sozinho capturaria: %d", sum(keep_extra, na.rm = TRUE)))
   }
 
   if (!is.null(export_dir)) {
@@ -677,6 +606,48 @@ categorizar_foco <- function(SUBSarr, SUBSarrSIM) {
     SUBSarrSIM == "OURO"        ~ "ouro",
     SUBSarr    == "CASSITERITA" ~ "cassiterita",
     TRUE                        ~ "outros"
+  )
+}
+
+# Minerais estrategicos monitorados (14 grupos) + classificar_grupo(): mapeia
+# a substancia declarada (SUBSarr/SUBS) pro grupo. Usado no 05 (classifica
+# SUBSarrSIM antes da correcao de peso) e no 06 (classifica SUBSpmaGRP do
+# poligono, e SUBSarrSIM chega pronto no checkpoint 05_cfem_bruto).
+target_minerals_list <- list(
+  ouro         = c("OURO","MINÉRIO DE OURO","OURO NATIVO","OURO PIGMENTO","ALUVIÃO AURÍFERO"),
+  diamante     = c("DIAMANTE","DIAMANTE INDUSTRIAL","CASCALHO DIAMANTÍFERO"),
+  litio        = c("LÍTIO","MINÉRIO DE LÍTIO","ESPODUMÊNIO","LEPIDOLITA","PETALITA","AMBLIGONITA","POLUCITA","KUNZITA"),
+  niobio       = c("NIÓBIO","MINÉRIO DE NIÓBIO","COLUMBITA","PIROCLORO"),
+  tantalo      = c("TÂNTALO","MINÉRIO DE TÂNTALO","TANTALITA","TANTALITA-COLUMBITA"),
+  estanho      = c("ESTANHO","MINÉRIO DE ESTANHO","CASSITERITA","ALUVIÃO ESTANÍFERO"),
+  tungstenio   = c("TUNGSTÊNIO","MINÉRIO DE TUNGSTÊNIO","WOLFRAMITA","SCHEELITA"),
+  titanio      = c("TITÂNIO","MINÉRIO DE TITÂNIO","ILMENITA","RUTILO","TITANITA"),
+  terras_raras = c("TERRAS RARAS","MONAZITA","MINÉRIO DE CÉRIO"),
+  cobalto      = c("MINÉRIO DE COBALTO"),
+  grafite      = c("GRAFITA"),
+  niquel       = c("NÍQUEL","MINÉRIO DE NÍQUEL","SILICATOS DE NÍQUEL"),
+  vanadio      = c("VANÁDIO","MINÉRIO DE VANÁDIO"),
+  molibdenio   = c("MOLIBDÊNIO","MINÉRIO DE MOLIBDÊNIO","MOLIBDENITA")
+)
+target_minerals <- unique(unlist(target_minerals_list))
+
+classificar_grupo <- function(subs) {
+  dplyr::case_when(
+    subs %in% target_minerals_list$ouro         ~ "OURO",
+    subs %in% target_minerals_list$diamante     ~ "DIAMANTE",
+    subs %in% target_minerals_list$litio        ~ "LÍTIO",
+    subs %in% target_minerals_list$niobio       ~ "NIÓBIO",
+    subs %in% target_minerals_list$tantalo      ~ "TÂNTALO",
+    subs %in% target_minerals_list$estanho      ~ "ESTANHO",
+    subs %in% target_minerals_list$tungstenio   ~ "TUNGSTÊNIO",
+    subs %in% target_minerals_list$titanio      ~ "TITÂNIO",
+    subs %in% target_minerals_list$terras_raras ~ "TERRAS RARAS",
+    subs %in% target_minerals_list$cobalto      ~ "COBALTO",
+    subs %in% target_minerals_list$grafite      ~ "GRAFITE",
+    subs %in% target_minerals_list$niquel       ~ "NÍQUEL",
+    subs %in% target_minerals_list$vanadio      ~ "VANÁDIO",
+    subs %in% target_minerals_list$molibdenio   ~ "MOLIBDÊNIO",
+    TRUE                                         ~ "OUTROS"
   )
 }
 
